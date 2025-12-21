@@ -13,6 +13,94 @@ except ImportError:
     Workbook = None
 
 
+def format_snr(value) -> str:
+    """Format SNR to JS8Call display format. '2' -> '+02', '-10' -> '-10'"""
+    if value is None or value == "":
+        return ""
+    try:
+        num = int(str(value).replace("+", ""))
+        return f"{num:+03d}"
+    except ValueError:
+        return str(value)  # Return as-is if can't parse (old data)
+
+
+def get_adjacent_grids(grid: str) -> list:
+    """Return list of 8 adjacent grid squares for a Maidenhead grid."""
+    if len(grid) < 4:
+        return []
+
+    try:
+        field_lon = ord(grid[0].upper())  # A-R
+        field_lat = ord(grid[1].upper())  # A-R
+        sq_lon = int(grid[2])             # 0-9
+        sq_lat = int(grid[3])             # 0-9
+    except (ValueError, IndexError):
+        return []
+
+    adjacent = []
+    for d_lon in [-1, 0, 1]:
+        for d_lat in [-1, 0, 1]:
+            if d_lon == 0 and d_lat == 0:
+                continue  # Skip center (the input grid itself)
+
+            new_sq_lon = sq_lon + d_lon
+            new_sq_lat = sq_lat + d_lat
+            new_field_lon = field_lon
+            new_field_lat = field_lat
+
+            # Handle wraparound
+            if new_sq_lon < 0:
+                new_sq_lon = 9
+                new_field_lon -= 1
+            elif new_sq_lon > 9:
+                new_sq_lon = 0
+                new_field_lon += 1
+
+            if new_sq_lat < 0:
+                new_sq_lat = 9
+                new_field_lat -= 1
+            elif new_sq_lat > 9:
+                new_sq_lat = 0
+                new_field_lat += 1
+
+            # Bounds check (A-R)
+            if new_field_lon < ord('A') or new_field_lon > ord('R'):
+                continue
+            if new_field_lat < ord('A') or new_field_lat > ord('R'):
+                continue
+
+            new_grid = f"{chr(new_field_lon)}{chr(new_field_lat)}{new_sq_lon}{new_sq_lat}"
+            adjacent.append(new_grid)
+
+    return adjacent
+
+
+def format_age(timestamp: str) -> str:
+    """Format timestamp as human-readable age (e.g., '2h ago', '1d ago')."""
+    if not timestamp:
+        return ""
+    try:
+        dt = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
+        now = datetime.utcnow()
+        delta = now - dt
+
+        minutes = int(delta.total_seconds() / 60)
+        hours = int(delta.total_seconds() / 3600)
+        days = delta.days
+        weeks = days // 7
+
+        if minutes < 60:
+            return f"{minutes}m ago"
+        elif hours < 24:
+            return f"{hours}h ago"
+        elif days < 7:
+            return f"{days}d ago"
+        else:
+            return f"{weeks}w ago"
+    except ValueError:
+        return ""
+
+
 class Database:
     def __init__(self, db_path: str = "js8_log.db"):
         self.db_path = Path(db_path)
@@ -95,6 +183,44 @@ class Database:
         """)
         return [dict(row) for row in cursor.fetchall()]
 
+    def get_grids_with_snr_stats(self) -> list:
+        """Get all callsign-grid mappings with SNR statistics."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT
+                cg.callsign,
+                cg.grid,
+                MAX(CAST(dm.my_snr_of_them AS INTEGER)) as max_my_snr,
+                MIN(CAST(dm.my_snr_of_them AS INTEGER)) as min_my_snr,
+                MAX(CAST(dm.their_snr_of_me AS INTEGER)) as max_their_snr,
+                MIN(CAST(dm.their_snr_of_me AS INTEGER)) as min_their_snr,
+                MAX(dm.timestamp) as last_contact
+            FROM callsign_grids cg
+            LEFT JOIN directed_messages dm ON cg.callsign = dm.callsign
+            GROUP BY cg.callsign, cg.grid
+            ORDER BY cg.callsign
+        """)
+        return [dict(row) for row in cursor.fetchall()]
+
+    def lookup_by_grid(self, grid: str) -> list:
+        """Find callsigns by grid square, sorted by likelihood to hear you."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT
+                cg.callsign,
+                cg.grid,
+                AVG(CAST(dm.their_snr_of_me AS INTEGER)) as avg_their_snr,
+                MAX(CAST(dm.their_snr_of_me AS INTEGER)) as max_their_snr,
+                COUNT(dm.id) as contact_count,
+                MAX(dm.timestamp) as last_contact
+            FROM callsign_grids cg
+            INNER JOIN directed_messages dm ON cg.callsign = dm.callsign
+            WHERE cg.grid = ?
+            GROUP BY cg.callsign, cg.grid
+            ORDER BY avg_their_snr DESC
+        """, (grid.upper(),))
+        return [dict(row) for row in cursor.fetchall()]
+
     def get_message_count(self) -> int:
         """Get total message count."""
         cursor = self.conn.cursor()
@@ -137,8 +263,8 @@ class Database:
                 callsign,
                 qrz_url,
                 msg["timestamp"],
-                msg["my_snr_of_them"],
-                msg["their_snr_of_me"],
+                format_snr(msg["my_snr_of_them"]),
+                format_snr(msg["their_snr_of_me"]),
                 msg["message"]
             ])
 
@@ -149,18 +275,33 @@ class Database:
         ws1.column_dimensions["E"].width = 15
         ws1.column_dimensions["F"].width = 50
 
-        # Sheet 2: Callsign Grids
+        # Sheet 2: Callsign Grids with SNR stats
         ws2 = wb.create_sheet("Callsign Grids")
-        ws2.append(["Callsign", "QRZ", "Grid Square"])
+        ws2.append(["Callsign", "QRZ", "Grid", "Max My SNR", "Min My SNR",
+                    "Max Their SNR", "Min Their SNR", "Last Contact"])
 
-        for grid_entry in self.get_all_grids():
-            callsign = grid_entry["callsign"]
+        for entry in self.get_grids_with_snr_stats():
+            callsign = entry["callsign"]
             qrz_url = f"https://www.qrz.com/db/{callsign}" if callsign else ""
-            ws2.append([callsign, qrz_url, grid_entry["grid"]])
+            ws2.append([
+                callsign,
+                qrz_url,
+                entry["grid"],
+                format_snr(entry["max_my_snr"]),
+                format_snr(entry["min_my_snr"]),
+                format_snr(entry["max_their_snr"]),
+                format_snr(entry["min_their_snr"]),
+                format_age(entry["last_contact"])
+            ])
 
         ws2.column_dimensions["A"].width = 12
         ws2.column_dimensions["B"].width = 35
-        ws2.column_dimensions["C"].width = 12
+        ws2.column_dimensions["C"].width = 8
+        ws2.column_dimensions["D"].width = 12
+        ws2.column_dimensions["E"].width = 12
+        ws2.column_dimensions["F"].width = 14
+        ws2.column_dimensions["G"].width = 14
+        ws2.column_dimensions["H"].width = 12
 
         wb.save(output_path)
         return True

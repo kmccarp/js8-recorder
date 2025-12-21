@@ -10,7 +10,7 @@ import subprocess
 import platform
 from pathlib import Path
 
-from database import Database
+from database import Database, format_snr, format_age, get_adjacent_grids
 from js8_client import JS8Client
 
 
@@ -124,16 +124,26 @@ class JS8RecorderApp:
         self.notebook.add(grids_frame, text="Callsign Grids")
 
         # Grids treeview
-        grid_columns = ("callsign", "qrz", "grid")
+        grid_columns = ("callsign", "qrz", "grid", "max_my", "min_my", "max_their", "min_their", "last")
         self.grids_tree = ttk.Treeview(grids_frame, columns=grid_columns, show="headings")
 
         self.grids_tree.heading("callsign", text="Callsign")
         self.grids_tree.heading("qrz", text="QRZ")
-        self.grids_tree.heading("grid", text="Grid Square")
+        self.grids_tree.heading("grid", text="Grid")
+        self.grids_tree.heading("max_my", text="Max My SNR")
+        self.grids_tree.heading("min_my", text="Min My SNR")
+        self.grids_tree.heading("max_their", text="Max Their SNR")
+        self.grids_tree.heading("min_their", text="Min Their SNR")
+        self.grids_tree.heading("last", text="Last Contact")
 
-        self.grids_tree.column("callsign", width=100)
-        self.grids_tree.column("qrz", width=50)
-        self.grids_tree.column("grid", width=100)
+        self.grids_tree.column("callsign", width=80)
+        self.grids_tree.column("qrz", width=40)
+        self.grids_tree.column("grid", width=60)
+        self.grids_tree.column("max_my", width=85)
+        self.grids_tree.column("min_my", width=85)
+        self.grids_tree.column("max_their", width=95)
+        self.grids_tree.column("min_their", width=95)
+        self.grids_tree.column("last", width=80)
 
         # Scrollbar for grids
         grid_scroll = ttk.Scrollbar(grids_frame, orient=tk.VERTICAL, command=self.grids_tree.yview)
@@ -144,6 +154,55 @@ class JS8RecorderApp:
 
         # Bind double-click on grids tree
         self.grids_tree.bind("<Double-1>", self._on_grids_tree_double_click)
+
+        # Lookup tab
+        lookup_frame = ttk.Frame(self.notebook)
+        self.notebook.add(lookup_frame, text="Lookup")
+
+        # Search controls
+        search_frame = ttk.Frame(lookup_frame, padding="10")
+        search_frame.pack(fill=tk.X)
+
+        ttk.Label(search_frame, text="Grid Square:").pack(side=tk.LEFT)
+        self.lookup_grid_var = tk.StringVar()
+        self.lookup_entry = ttk.Entry(search_frame, textvariable=self.lookup_grid_var, width=10)
+        self.lookup_entry.pack(side=tk.LEFT, padx=(5, 10))
+        self.lookup_entry.bind("<Return>", lambda e: self._do_lookup())
+
+        ttk.Button(search_frame, text="Search", command=self._do_lookup).pack(side=tk.LEFT)
+
+        # Lookup results treeview
+        lookup_columns = ("callsign", "qrz", "grid", "avg_snr", "max_snr", "contacts", "last")
+        self.lookup_tree = ttk.Treeview(lookup_frame, columns=lookup_columns, show="headings")
+
+        self.lookup_tree.heading("callsign", text="Callsign")
+        self.lookup_tree.heading("qrz", text="QRZ")
+        self.lookup_tree.heading("grid", text="Grid")
+        self.lookup_tree.heading("avg_snr", text="Avg Their SNR")
+        self.lookup_tree.heading("max_snr", text="Max Their SNR")
+        self.lookup_tree.heading("contacts", text="Contacts")
+        self.lookup_tree.heading("last", text="Last Contact")
+
+        self.lookup_tree.column("callsign", width=80)
+        self.lookup_tree.column("qrz", width=40)
+        self.lookup_tree.column("grid", width=60)
+        self.lookup_tree.column("avg_snr", width=100)
+        self.lookup_tree.column("max_snr", width=100)
+        self.lookup_tree.column("contacts", width=70)
+        self.lookup_tree.column("last", width=80)
+
+        # Scrollbar for lookup
+        lookup_scroll = ttk.Scrollbar(lookup_frame, orient=tk.VERTICAL, command=self.lookup_tree.yview)
+        self.lookup_tree.configure(yscrollcommand=lookup_scroll.set)
+
+        self.lookup_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        lookup_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Bind double-click on lookup tree
+        self.lookup_tree.bind("<Double-1>", self._on_lookup_tree_double_click)
+
+        # Configure tag for exact match highlighting
+        self.lookup_tree.tag_configure("exact", background="#d4edda")
 
         # Status bar
         self.status_var = tk.StringVar(value="Ready")
@@ -183,8 +242,8 @@ class JS8RecorderApp:
                 msg["callsign"],
                 "Link",
                 msg["timestamp"],
-                msg["my_snr_of_them"],
-                msg["their_snr_of_me"],
+                format_snr(msg["my_snr_of_them"]),
+                format_snr(msg["their_snr_of_me"]),
                 msg["message"]
             ))
 
@@ -192,11 +251,16 @@ class JS8RecorderApp:
         for item in self.grids_tree.get_children():
             self.grids_tree.delete(item)
 
-        for grid_entry in self.db.get_all_grids():
+        for entry in self.db.get_grids_with_snr_stats():
             self.grids_tree.insert("", tk.END, values=(
-                grid_entry["callsign"],
+                entry["callsign"],
                 "Link",
-                grid_entry["grid"]
+                entry["grid"],
+                format_snr(entry["max_my_snr"]),
+                format_snr(entry["min_my_snr"]),
+                format_snr(entry["max_their_snr"]),
+                format_snr(entry["min_their_snr"]),
+                format_age(entry["last_contact"])
             ))
 
         # Update count
@@ -308,6 +372,69 @@ class JS8RecorderApp:
             if values and values[0]:
                 self._open_qrz(values[0])
 
+    def _on_lookup_tree_double_click(self, event):
+        """Handle double-click on lookup treeview."""
+        item = self.lookup_tree.identify_row(event.y)
+        column = self.lookup_tree.identify_column(event.x)
+
+        if item and column == "#2":  # QRZ column
+            values = self.lookup_tree.item(item, "values")
+            if values and values[0]:
+                self._open_qrz(values[0])
+
+    def _do_lookup(self):
+        """Perform grid lookup search including adjacent grid squares."""
+        grid = self.lookup_grid_var.get().strip().upper()
+        if not grid:
+            return
+
+        # Clear existing results
+        for item in self.lookup_tree.get_children():
+            self.lookup_tree.delete(item)
+
+        # Get results for exact grid match
+        exact_results = self.db.lookup_by_grid(grid)
+
+        # Get results for adjacent grids
+        adjacent_grids = get_adjacent_grids(grid)
+        adjacent_results = []
+        for adj_grid in adjacent_grids:
+            adjacent_results.extend(self.db.lookup_by_grid(adj_grid))
+
+        # Sort adjacent results by avg SNR (descending)
+        adjacent_results.sort(key=lambda x: x["avg_their_snr"] or -999, reverse=True)
+
+        # Insert exact matches first (highlighted)
+        for entry in exact_results:
+            avg_snr = entry["avg_their_snr"]
+            avg_formatted = format_snr(int(round(avg_snr))) if avg_snr is not None else ""
+            self.lookup_tree.insert("", tk.END, values=(
+                entry["callsign"],
+                "Link",
+                entry["grid"],
+                avg_formatted,
+                format_snr(entry["max_their_snr"]),
+                entry["contact_count"],
+                format_age(entry["last_contact"])
+            ), tags=("exact",))
+
+        # Insert adjacent results
+        for entry in adjacent_results:
+            avg_snr = entry["avg_their_snr"]
+            avg_formatted = format_snr(int(round(avg_snr))) if avg_snr is not None else ""
+            self.lookup_tree.insert("", tk.END, values=(
+                entry["callsign"],
+                "Link",
+                entry["grid"],
+                avg_formatted,
+                format_snr(entry["max_their_snr"]),
+                entry["contact_count"],
+                format_age(entry["last_contact"])
+            ))
+
+        total = len(exact_results) + len(adjacent_results)
+        self.status_var.set(f"Found {len(exact_results)} exact + {len(adjacent_results)} adjacent = {total} callsign(s)")
+
     # Thread-safe callbacks using queue
     def _on_message(self, record: dict):
         """Called from client thread when a message is received."""
@@ -345,8 +472,8 @@ class JS8RecorderApp:
                         data["callsign"],
                         "Link",
                         data["timestamp"],
-                        data["my_snr_of_them"],
-                        data["their_snr_of_me"],
+                        format_snr(data["my_snr_of_them"]),
+                        format_snr(data["their_snr_of_me"]),
                         data["message"]
                     ))
                     # Update count
@@ -379,11 +506,16 @@ class JS8RecorderApp:
         for item in self.grids_tree.get_children():
             self.grids_tree.delete(item)
 
-        for grid_entry in self.db.get_all_grids():
+        for entry in self.db.get_grids_with_snr_stats():
             self.grids_tree.insert("", tk.END, values=(
-                grid_entry["callsign"],
+                entry["callsign"],
                 "Link",
-                grid_entry["grid"]
+                entry["grid"],
+                format_snr(entry["max_my_snr"]),
+                format_snr(entry["min_my_snr"]),
+                format_snr(entry["max_their_snr"]),
+                format_snr(entry["min_their_snr"]),
+                format_age(entry["last_contact"])
             ))
 
     def _on_close(self):

@@ -9,6 +9,16 @@ from datetime import datetime
 from typing import Callable, Optional
 
 
+def _parse_snr(value) -> str:
+    """Parse SNR to integer string. '+02' -> '2', '-10' -> '-10'"""
+    if value is None or value == "":
+        return ""
+    try:
+        return str(int(str(value).replace("+", "")))
+    except ValueError:
+        return ""
+
+
 class JS8Client:
     def __init__(self, host: str = "127.0.0.1", port: int = 2442, my_callsign: str = ""):
         self.host = host
@@ -100,8 +110,8 @@ class JS8Client:
 
         # Extract fields
         callsign = params.get("FROM", "")
-        grid = params.get("GRID", "")
-        snr = params.get("SNR", "")
+        grid = params.get("GRID", "").strip()
+        snr = _parse_snr(params.get("SNR", ""))
 
         # UTC timestamp
         utc = params.get("UTC", "")
@@ -116,12 +126,12 @@ class JS8Client:
             parts = value.upper().split("SNR")
             if len(parts) > 1:
                 snr_part = parts[1].strip().split()[0] if parts[1].strip() else ""
-                their_snr_of_me = snr_part
+                their_snr_of_me = _parse_snr(snr_part)
 
         record = {
             "callsign": callsign,
             "timestamp": timestamp,
-            "my_snr_of_them": str(snr) if snr else "",
+            "my_snr_of_them": snr,
             "their_snr_of_me": their_snr_of_me,
             "message": value
         }
@@ -173,7 +183,7 @@ class JS8Client:
                         params = msg.get("params", {})
                         for call, info in params.items():
                             if isinstance(info, dict) and info.get("GRID") and self.on_grid:
-                                self.on_grid(call, info["GRID"])
+                                self.on_grid(call, info["GRID"].strip())
 
             except socket.timeout:
                 continue
