@@ -549,6 +549,7 @@ class JS8RecorderApp:
                 format_snr(entry["min_their_snr"]),
                 format_age(entry["last_contact"])
             ))
+        self.grids_tree.update_idletasks()
 
     def _on_close(self):
         """Handle window close."""
