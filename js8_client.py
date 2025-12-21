@@ -133,7 +133,8 @@ class JS8Client:
             "timestamp": timestamp,
             "my_snr_of_them": snr,
             "their_snr_of_me": their_snr_of_me,
-            "message": value
+            "message": value,
+            "grid": grid
         }
 
         if self.on_message:

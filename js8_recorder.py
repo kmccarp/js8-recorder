@@ -497,6 +497,8 @@ class JS8RecorderApp:
                         data["their_snr_of_me"],
                         data["message"]
                     )
+                    # Ensure callsign is in grids table (updates grid if provided)
+                    self.db.add_grid(data["callsign"], data.get("grid", ""))
                     # Add to treeview at top
                     self.messages_tree.insert("", 0, values=(
                         data["callsign"],

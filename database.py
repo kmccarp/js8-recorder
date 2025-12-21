@@ -153,14 +153,22 @@ class Database:
         return cursor.lastrowid
 
     def add_grid(self, callsign: str, grid: str):
-        """Add or update a callsign-grid mapping."""
+        """Add or update a callsign-grid mapping. Won't overwrite existing grid with empty."""
         cursor = self.conn.cursor()
-        cursor.execute("""
-            INSERT INTO callsign_grids (callsign, grid, updated_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(callsign) DO UPDATE SET grid = ?, updated_at = ?
-        """, (callsign, grid, datetime.utcnow().isoformat(),
-              grid, datetime.utcnow().isoformat()))
+        now = datetime.utcnow().isoformat()
+        if grid:
+            # Insert or update with the new grid
+            cursor.execute("""
+                INSERT INTO callsign_grids (callsign, grid, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(callsign) DO UPDATE SET grid = ?, updated_at = ?
+            """, (callsign, grid, now, grid, now))
+        else:
+            # Only insert if callsign doesn't exist, don't overwrite existing grid
+            cursor.execute("""
+                INSERT OR IGNORE INTO callsign_grids (callsign, grid, updated_at)
+                VALUES (?, '', ?)
+            """, (callsign, now))
         self.conn.commit()
 
     def get_all_messages(self) -> list:
