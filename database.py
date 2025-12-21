@@ -203,8 +203,9 @@ class Database:
         return [dict(row) for row in cursor.fetchall()]
 
     def lookup_by_grid(self, grid: str) -> list:
-        """Find callsigns by grid square, sorted by likelihood to hear you."""
+        """Find callsigns by grid square prefix, sorted by likelihood to hear you."""
         cursor = self.conn.cursor()
+        # Use LIKE for prefix matching (e.g., "EM48" matches "EM48", "EM48ab", etc.)
         cursor.execute("""
             SELECT
                 cg.callsign,
@@ -215,7 +216,7 @@ class Database:
                 MAX(dm.timestamp) as last_contact
             FROM callsign_grids cg
             INNER JOIN directed_messages dm ON cg.callsign = dm.callsign
-            WHERE cg.grid = ?
+            WHERE cg.grid LIKE ? || '%'
             GROUP BY cg.callsign, cg.grid
             ORDER BY avg_their_snr DESC
         """, (grid.upper(),))

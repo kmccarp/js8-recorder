@@ -47,6 +47,21 @@ class JS8RecorderApp:
         # Handle window close
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
+        # Auto-start if enabled and callsign is configured
+        if self.autostart_var.get() and self.callsign_var.get().strip():
+            self.root.after(500, self._auto_start)
+
+    def _auto_start(self):
+        """Attempt to auto-start listening on launch."""
+        self._start_listening()
+        # If connection failed, show a warning
+        if not self.client.is_running:
+            self.root.after(1000, lambda: messagebox.showwarning(
+                "Auto-start Failed",
+                f"Could not connect to JS8Call at {self.host_var.get()}:{self.port_var.get()}\n\n"
+                "Make sure JS8Call is running with the API enabled."
+            ))
+
     def _create_widgets(self):
         """Create all GUI widgets."""
         # Top frame - Configuration
@@ -82,6 +97,14 @@ class JS8RecorderApp:
         # Export button
         self.export_button = ttk.Button(button_frame, text="Export to Excel", command=self._export_excel)
         self.export_button.pack(side=tk.LEFT, padx=5)
+
+        # Auto-start checkbox
+        self.autostart_var = tk.BooleanVar(value=False)
+        self.autostart_check = ttk.Checkbutton(
+            button_frame, text="Start on launch",
+            variable=self.autostart_var, command=self._save_settings
+        )
+        self.autostart_check.pack(side=tk.LEFT, padx=15)
 
         # Notebook for tabs
         self.notebook = ttk.Notebook(self.root)
@@ -220,16 +243,19 @@ class JS8RecorderApp:
         callsign = self.db.get_setting("callsign", "")
         host = self.db.get_setting("host", "127.0.0.1")
         port = self.db.get_setting("port", "2442")
+        autostart = self.db.get_setting("autostart", "0") == "1"
 
         self.callsign_var.set(callsign)
         self.host_var.set(host)
         self.port_var.set(port)
+        self.autostart_var.set(autostart)
 
     def _save_settings(self):
         """Save settings to database."""
         self.db.set_setting("callsign", self.callsign_var.get())
         self.db.set_setting("host", self.host_var.get())
         self.db.set_setting("port", self.port_var.get())
+        self.db.set_setting("autostart", "1" if self.autostart_var.get() else "0")
 
     def _refresh_tables(self):
         """Refresh both treeviews from database."""
@@ -388,11 +414,15 @@ class JS8RecorderApp:
         if not grid:
             return
 
+        if len(grid) < 4:
+            self.status_var.set("Grid must be at least 4 characters (e.g., EM48)")
+            return
+
         # Clear existing results
         for item in self.lookup_tree.get_children():
             self.lookup_tree.delete(item)
 
-        # Get results for exact grid match
+        # Get results for grid prefix match
         exact_results = self.db.lookup_by_grid(grid)
 
         # Get results for adjacent grids
@@ -433,7 +463,7 @@ class JS8RecorderApp:
             ))
 
         total = len(exact_results) + len(adjacent_results)
-        self.status_var.set(f"Found {len(exact_results)} exact + {len(adjacent_results)} adjacent = {total} callsign(s)")
+        self.status_var.set(f"Found {len(exact_results)} in {grid}* + {len(adjacent_results)} adjacent = {total} callsign(s)")
 
     # Thread-safe callbacks using queue
     def _on_message(self, record: dict):
