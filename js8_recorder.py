@@ -479,6 +479,8 @@ class JS8RecorderApp:
                     # Update count
                     count = self.db.get_message_count()
                     self.count_var.set(f"{count} message{'s' if count != 1 else ''}")
+                    # Refresh grids table to update SNR stats and last contact
+                    self._refresh_grids_table()
 
                 elif msg_type == "grid":
                     callsign, grid = data
