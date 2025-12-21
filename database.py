@@ -172,12 +172,12 @@ class Database:
         self.conn.commit()
 
     def get_all_messages(self) -> list:
-        """Get all directed messages."""
+        """Get all directed messages, oldest first (for display with newest at top)."""
         cursor = self.conn.cursor()
         cursor.execute("""
             SELECT id, callsign, timestamp, my_snr_of_them, their_snr_of_me, message
             FROM directed_messages
-            ORDER BY timestamp DESC
+            ORDER BY timestamp ASC
         """)
         return [dict(row) for row in cursor.fetchall()]
 

@@ -142,6 +142,9 @@ class JS8RecorderApp:
         # Bind double-click on QRZ column
         self.messages_tree.bind("<Double-1>", self._on_tree_double_click)
 
+        # Tag for messages received during this session
+        self.messages_tree.tag_configure("session", background="#d4edda")
+
         # Grids tab
         grids_frame = ttk.Frame(self.notebook)
         self.notebook.add(grids_frame, text="Callsign Grids")
@@ -499,7 +502,7 @@ class JS8RecorderApp:
                     )
                     # Ensure callsign is in grids table (updates grid if provided)
                     self.db.add_grid(data["callsign"], data.get("grid", ""))
-                    # Add to treeview at top
+                    # Add to treeview at top (highlighted as session message)
                     self.messages_tree.insert("", 0, values=(
                         data["callsign"],
                         "Link",
@@ -507,7 +510,7 @@ class JS8RecorderApp:
                         format_snr(data["my_snr_of_them"]),
                         format_snr(data["their_snr_of_me"]),
                         data["message"]
-                    ))
+                    ), tags=("session",))
                     # Update count
                     count = self.db.get_message_count()
                     self.count_var.set(f"{count} message{'s' if count != 1 else ''}")
