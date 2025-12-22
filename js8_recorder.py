@@ -58,6 +58,8 @@ class JS8RecorderApp:
         self._create_widgets()
         self._load_settings()
         self._refresh_tables()
+        if HAS_MATPLOTLIB:
+            self._refresh_map()
 
         # Start processing message queue
         self._process_queue()
@@ -276,9 +278,6 @@ class JS8RecorderApp:
             # Embed in tkinter
             self.map_canvas = FigureCanvasTkAgg(self.map_fig, master=map_frame)
             self.map_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-
-            # Initial draw
-            self._refresh_map()
 
         # Status bar
         self.status_var = tk.StringVar(value="Ready")
