@@ -605,6 +605,79 @@ class JS8RecorderApp:
             ))
         self.grids_tree.update_idletasks()
 
+    def _draw_maidenhead_grid(self, min_lon, max_lon, min_lat, max_lat):
+        """Draw Maidenhead grid overlay on the map."""
+        # Draw grid lines every 2° longitude, 1° latitude (square boundaries)
+        # Snap to grid boundaries
+        start_lon = int(min_lon / 2) * 2
+        end_lon = int(max_lon / 2 + 1) * 2
+        start_lat = int(min_lat)
+        end_lat = int(max_lat + 1)
+
+        # Draw vertical lines (longitude) - thicker at field boundaries (every 20°)
+        for lon in range(start_lon, end_lon + 1, 2):
+            is_field_boundary = (lon + 180) % 20 == 0
+            lw = 1.5 if is_field_boundary else 0.3
+            alpha = 0.7 if is_field_boundary else 0.5
+            if HAS_CARTOPY:
+                self.map_ax.plot([lon, lon], [start_lat, end_lat],
+                               color='gray', linewidth=lw, alpha=alpha,
+                               transform=ccrs.PlateCarree(), zorder=2)
+            else:
+                self.map_ax.axvline(x=lon, color='gray', linewidth=lw, alpha=alpha, zorder=2)
+
+        # Draw horizontal lines (latitude) - thicker at field boundaries (every 10°)
+        for lat in range(start_lat, end_lat + 1, 1):
+            is_field_boundary = (lat + 90) % 10 == 0
+            lw = 1.5 if is_field_boundary else 0.3
+            alpha = 0.7 if is_field_boundary else 0.5
+            if HAS_CARTOPY:
+                self.map_ax.plot([start_lon, end_lon], [lat, lat],
+                               color='gray', linewidth=lw, alpha=alpha,
+                               transform=ccrs.PlateCarree(), zorder=2)
+            else:
+                self.map_ax.axhline(y=lat, color='gray', linewidth=lw, alpha=alpha, zorder=2)
+
+        # Add square numbers (e.g., "28") at center of each square
+        for lon in range(start_lon, end_lon, 2):
+            for lat in range(start_lat, end_lat, 1):
+                sq_lon = int(((lon + 180) % 20) / 2)
+                sq_lat = int((lat + 90) % 10)
+                sq_label = f"{sq_lon}{sq_lat}"
+
+                center_lon = lon + 1
+                center_lat = lat + 0.5
+                if HAS_CARTOPY:
+                    self.map_ax.text(center_lon, center_lat, sq_label, fontsize=6,
+                                    ha='center', va='center', alpha=0.4,
+                                    transform=ccrs.PlateCarree(), zorder=3)
+                else:
+                    self.map_ax.text(center_lon, center_lat, sq_label, fontsize=6,
+                                    ha='center', va='center', alpha=0.4, zorder=3)
+
+        # Add field letters (e.g., "EN") at center of each field region
+        field_start_lon = int((min_lon + 180) / 20) * 20 - 180
+        field_end_lon = int((max_lon + 180) / 20 + 1) * 20 - 180
+        field_start_lat = int((min_lat + 90) / 10) * 10 - 90
+        field_end_lat = int((max_lat + 90) / 10 + 1) * 10 - 90
+
+        for flon in range(field_start_lon, field_end_lon, 20):
+            for flat in range(field_start_lat, field_end_lat, 10):
+                field_lon = chr(ord('A') + int((flon + 180) / 20))
+                field_lat = chr(ord('A') + int((flat + 90) / 10))
+                field_label = f"{field_lon}{field_lat}"
+
+                center_lon = flon + 10
+                center_lat = flat + 5
+                if HAS_CARTOPY:
+                    self.map_ax.text(center_lon, center_lat, field_label, fontsize=16,
+                                    ha='center', va='center', alpha=0.3, color='purple',
+                                    fontweight='bold', transform=ccrs.PlateCarree(), zorder=3)
+                else:
+                    self.map_ax.text(center_lon, center_lat, field_label, fontsize=16,
+                                    ha='center', va='center', alpha=0.3, color='purple',
+                                    fontweight='bold', zorder=3)
+
     def _refresh_map(self):
         """Refresh the map with current contact locations."""
         if not self.map_ax:
@@ -621,7 +694,6 @@ class JS8RecorderApp:
             self.map_ax.add_feature(cfeature.STATES, linewidth=0.2, linestyle=':')
         else:
             self.map_ax.set_facecolor('lightblue')
-            self.map_ax.grid(True, linestyle='--', alpha=0.5)
 
         entries = self.db.get_grids_with_snr_stats()
 
@@ -661,6 +733,13 @@ class JS8RecorderApp:
 
         # Plot scatter points
         if lons:
+            # Calculate bounds
+            min_lon, max_lon = min(lons) - 10, max(lons) + 10
+            min_lat, max_lat = min(lats) - 5, max(lats) + 5
+
+            # Draw Maidenhead grid overlay first (behind markers)
+            self._draw_maidenhead_grid(min_lon, max_lon, min_lat, max_lat)
+
             if HAS_CARTOPY:
                 self.map_ax.scatter(lons, lats, c=colors, s=sizes, alpha=0.7,
                                    edgecolors='black', linewidth=0.5,
@@ -670,8 +749,7 @@ class JS8RecorderApp:
                     self.map_ax.text(lon, lat + 1, label, fontsize=7, ha='center',
                                     transform=ccrs.PlateCarree(), zorder=6)
                 # Set extent to show all points with padding
-                self.map_ax.set_extent([min(lons) - 10, max(lons) + 10,
-                                       min(lats) - 5, max(lats) + 5],
+                self.map_ax.set_extent([min_lon, max_lon, min_lat, max_lat],
                                        crs=ccrs.PlateCarree())
             else:
                 self.map_ax.scatter(lons, lats, c=colors, s=sizes, alpha=0.7,
@@ -679,8 +757,8 @@ class JS8RecorderApp:
                 # Add callsign labels
                 for lon, lat, label in zip(lons, lats, labels):
                     self.map_ax.text(lon, lat + 1, label, fontsize=7, ha='center', zorder=6)
-                self.map_ax.set_xlim(min(lons) - 10, max(lons) + 10)
-                self.map_ax.set_ylim(min(lats) - 5, max(lats) + 5)
+                self.map_ax.set_xlim(min_lon, max_lon)
+                self.map_ax.set_ylim(min_lat, max_lat)
 
             self.map_ax.set_xlabel('Longitude')
             self.map_ax.set_ylabel('Latitude')
