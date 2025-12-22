@@ -10,8 +10,26 @@ import subprocess
 import platform
 from pathlib import Path
 
-from database import Database, format_snr, format_age, get_adjacent_grids
+from database import Database, format_snr, format_age, get_adjacent_grids, grid_to_latlon
 from js8_client import JS8Client
+
+# Optional matplotlib for map display
+try:
+    import matplotlib
+    matplotlib.use('TkAgg')
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    HAS_MATPLOTLIB = True
+except ImportError:
+    HAS_MATPLOTLIB = False
+
+# Optional cartopy for map backgrounds
+try:
+    import cartopy.crs as ccrs
+    import cartopy.feature as cfeature
+    HAS_CARTOPY = True
+except ImportError:
+    HAS_CARTOPY = False
 
 
 class JS8RecorderApp:
@@ -229,6 +247,38 @@ class JS8RecorderApp:
 
         # Configure tag for exact match highlighting
         self.lookup_tree.tag_configure("exact", background="#d4edda")
+
+        # Map tab (only if matplotlib is available)
+        self.map_canvas = None
+        self.map_fig = None
+        self.map_ax = None
+        if HAS_MATPLOTLIB:
+            map_frame = ttk.Frame(self.notebook)
+            self.notebook.add(map_frame, text="Map")
+
+            # Map controls
+            map_controls = ttk.Frame(map_frame, padding="5")
+            map_controls.pack(fill=tk.X)
+
+            ttk.Button(map_controls, text="Refresh Map", command=self._refresh_map).pack(side=tk.LEFT)
+            ttk.Label(map_controls, text="  (Color = SNR quality, Size = contact count)").pack(side=tk.LEFT)
+            if not HAS_CARTOPY:
+                ttk.Label(map_controls, text="  [Install python3-cartopy for map background]",
+                         foreground="gray").pack(side=tk.LEFT)
+
+            # Create matplotlib figure
+            self.map_fig = Figure(figsize=(8, 6), dpi=100)
+            if HAS_CARTOPY:
+                self.map_ax = self.map_fig.add_subplot(111, projection=ccrs.PlateCarree())
+            else:
+                self.map_ax = self.map_fig.add_subplot(111)
+
+            # Embed in tkinter
+            self.map_canvas = FigureCanvasTkAgg(self.map_fig, master=map_frame)
+            self.map_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+            # Initial draw
+            self._refresh_map()
 
         # Status bar
         self.status_var = tk.StringVar(value="Ready")
@@ -555,6 +605,95 @@ class JS8RecorderApp:
                 format_age(entry["last_contact"])
             ))
         self.grids_tree.update_idletasks()
+
+    def _refresh_map(self):
+        """Refresh the map with current contact locations."""
+        if not self.map_ax:
+            return
+
+        self.map_ax.clear()
+
+        # Add map features if cartopy is available
+        if HAS_CARTOPY:
+            self.map_ax.add_feature(cfeature.LAND, facecolor='lightgray')
+            self.map_ax.add_feature(cfeature.OCEAN, facecolor='lightblue')
+            self.map_ax.add_feature(cfeature.COASTLINE, linewidth=0.5)
+            self.map_ax.add_feature(cfeature.BORDERS, linewidth=0.3, linestyle=':')
+            self.map_ax.add_feature(cfeature.STATES, linewidth=0.2, linestyle=':')
+        else:
+            self.map_ax.set_facecolor('lightblue')
+            self.map_ax.grid(True, linestyle='--', alpha=0.5)
+
+        entries = self.db.get_grids_with_snr_stats()
+
+        lats, lons, colors, sizes, labels = [], [], [], [], []
+
+        for entry in entries:
+            grid = entry["grid"]
+            if not grid:
+                continue
+
+            coords = grid_to_latlon(grid)
+            if not coords:
+                continue
+
+            lat, lon = coords
+            callsign = entry["callsign"]
+            max_their_snr = entry["max_their_snr"]
+            contact_count = entry["contact_count"] or 1
+
+            # Determine marker color based on SNR (their reading of us)
+            if max_their_snr is None:
+                color = "gray"
+            elif max_their_snr >= 0:
+                color = "green"
+            elif max_their_snr >= -10:
+                color = "yellow"
+            elif max_their_snr >= -20:
+                color = "orange"
+            else:
+                color = "red"
+
+            lats.append(lat)
+            lons.append(lon)
+            colors.append(color)
+            sizes.append(30 + contact_count * 20)  # Size based on contact count
+            labels.append(callsign)
+
+        # Plot scatter points
+        if lons:
+            if HAS_CARTOPY:
+                self.map_ax.scatter(lons, lats, c=colors, s=sizes, alpha=0.7,
+                                   edgecolors='black', linewidth=0.5,
+                                   transform=ccrs.PlateCarree(), zorder=5)
+                # Add callsign labels
+                for lon, lat, label in zip(lons, lats, labels):
+                    self.map_ax.text(lon, lat + 1, label, fontsize=7, ha='center',
+                                    transform=ccrs.PlateCarree(), zorder=6)
+                # Set extent to show all points with padding
+                self.map_ax.set_extent([min(lons) - 10, max(lons) + 10,
+                                       min(lats) - 5, max(lats) + 5],
+                                       crs=ccrs.PlateCarree())
+            else:
+                self.map_ax.scatter(lons, lats, c=colors, s=sizes, alpha=0.7,
+                                   edgecolors='black', linewidth=0.5, zorder=5)
+                # Add callsign labels
+                for lon, lat, label in zip(lons, lats, labels):
+                    self.map_ax.text(lon, lat + 1, label, fontsize=7, ha='center', zorder=6)
+                self.map_ax.set_xlim(min(lons) - 10, max(lons) + 10)
+                self.map_ax.set_ylim(min(lats) - 5, max(lats) + 5)
+
+            self.map_ax.set_xlabel('Longitude')
+            self.map_ax.set_ylabel('Latitude')
+        else:
+            self.map_ax.text(0.5, 0.5, 'No contacts with grid squares',
+                            transform=self.map_ax.transAxes, ha='center', va='center')
+
+        self.map_ax.set_title(f'Contact Locations ({len(lons)} stations)')
+        self.map_fig.tight_layout()
+        self.map_canvas.draw()
+
+        self.status_var.set(f"Map updated with {len(lons)} locations")
 
     def _on_close(self):
         """Handle window close."""

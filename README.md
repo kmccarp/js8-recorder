@@ -11,6 +11,8 @@ A desktop application for recording and logging JS8Call RX.DIRECTED messages.
 - Double-click to open QRZ.com page for any callsign
 - Export to Excel (.xlsx) format
 - Settings persist between sessions
+- Interactive map showing contact locations (color-coded by SNR quality)
+- Lookup contacts by grid square with adjacent grid support
 
 ## Requirements
 
@@ -18,11 +20,23 @@ A desktop application for recording and logging JS8Call RX.DIRECTED messages.
 - JS8Call with TCP API enabled
 - tkinter (included with Python on Windows, `sudo apt install python3-tk` on Linux)
 - openpyxl (for Excel export)
+- matplotlib (optional, for map display)
+- cartopy (optional, for map backgrounds with coastlines/borders)
 
 ## Installation
 
 ```bash
+# Required
+sudo apt install python3-tk
+
+# For Excel export
 pip install openpyxl
+
+# For map display (optional)
+sudo apt install python3-matplotlib
+
+# For map backgrounds (optional)
+sudo apt install python3-cartopy
 ```
 
 ## Usage

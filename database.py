@@ -24,6 +24,24 @@ def format_snr(value) -> str:
         return str(value)  # Return as-is if can't parse (old data)
 
 
+def grid_to_latlon(grid: str) -> tuple:
+    """Convert 4-character Maidenhead grid to center lat/lon coordinates.
+
+    Returns (lat, lon) tuple or None if invalid grid.
+    """
+    if not grid or len(grid) < 4:
+        return None
+    try:
+        # A = -180 lon, A = -90 lat
+        # Each field = 20 lon x 10 lat degrees
+        # Each square = 2 lon x 1 lat degrees
+        lon = (ord(grid[0].upper()) - ord('A')) * 20 - 180 + int(grid[2]) * 2 + 1
+        lat = (ord(grid[1].upper()) - ord('A')) * 10 - 90 + int(grid[3]) * 1 + 0.5
+        return (lat, lon)
+    except (ValueError, IndexError):
+        return None
+
+
 def get_adjacent_grids(grid: str) -> list:
     """Return list of 8 adjacent grid squares for a Maidenhead grid."""
     if len(grid) < 4:
@@ -202,7 +220,8 @@ class Database:
                 MIN(CAST(dm.my_snr_of_them AS INTEGER)) as min_my_snr,
                 MAX(CAST(dm.their_snr_of_me AS INTEGER)) as max_their_snr,
                 MIN(CAST(dm.their_snr_of_me AS INTEGER)) as min_their_snr,
-                MAX(dm.timestamp) as last_contact
+                MAX(dm.timestamp) as last_contact,
+                COUNT(dm.id) as contact_count
             FROM callsign_grids cg
             LEFT JOIN directed_messages dm ON cg.callsign = dm.callsign
             GROUP BY cg.callsign, cg.grid
