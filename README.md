@@ -20,8 +20,7 @@ A desktop application for recording and logging JS8Call RX.DIRECTED messages.
 - JS8Call with TCP API enabled
 - tkinter (included with Python on Windows, `sudo apt install python3-tk` on Linux)
 - openpyxl (for Excel export)
-- matplotlib (optional, for map display)
-- cartopy (optional, for map backgrounds with coastlines/borders)
+- tkintermapview (optional, for interactive map display)
 
 ## Installation
 
@@ -32,11 +31,8 @@ sudo apt install python3-tk
 # For Excel export
 pip install openpyxl
 
-# For map display (optional)
-sudo apt install python3-matplotlib
-
-# For map backgrounds (optional)
-sudo apt install python3-cartopy
+# For interactive map display (optional)
+pip install tkintermapview
 ```
 
 ## Usage
