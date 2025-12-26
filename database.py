@@ -157,16 +157,22 @@ class Database:
             )
         """)
 
+        # Migration: Add band column if it doesn't exist
+        cursor.execute("PRAGMA table_info(directed_messages)")
+        columns = [col[1] for col in cursor.fetchall()]
+        if "band" not in columns:
+            cursor.execute("ALTER TABLE directed_messages ADD COLUMN band TEXT")
+
         self.conn.commit()
 
     def add_message(self, callsign: str, timestamp: str, my_snr_of_them: str,
-                    their_snr_of_me: str, message: str) -> int:
+                    their_snr_of_me: str, message: str, band: str = "") -> int:
         """Add a directed message to the database. Returns the row ID."""
         cursor = self.conn.cursor()
         cursor.execute("""
-            INSERT INTO directed_messages (callsign, timestamp, my_snr_of_them, their_snr_of_me, message)
-            VALUES (?, ?, ?, ?, ?)
-        """, (callsign, timestamp, my_snr_of_them, their_snr_of_me, message))
+            INSERT INTO directed_messages (callsign, timestamp, my_snr_of_them, their_snr_of_me, message, band)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (callsign, timestamp, my_snr_of_them, their_snr_of_me, message, band))
         self.conn.commit()
         return cursor.lastrowid
 
@@ -193,7 +199,7 @@ class Database:
         """Get all directed messages, oldest first (for display with newest at top)."""
         cursor = self.conn.cursor()
         cursor.execute("""
-            SELECT id, callsign, timestamp, my_snr_of_them, their_snr_of_me, message
+            SELECT id, callsign, timestamp, my_snr_of_them, their_snr_of_me, message, band
             FROM directed_messages
             ORDER BY timestamp ASC
         """)
@@ -210,7 +216,7 @@ class Database:
         return [dict(row) for row in cursor.fetchall()]
 
     def get_grids_with_snr_stats(self) -> list:
-        """Get all callsign-grid mappings with SNR statistics."""
+        """Get all callsign-grid mappings with SNR statistics and bands."""
         cursor = self.conn.cursor()
         cursor.execute("""
             SELECT
@@ -221,7 +227,8 @@ class Database:
                 MAX(CAST(dm.their_snr_of_me AS INTEGER)) as max_their_snr,
                 MIN(CAST(dm.their_snr_of_me AS INTEGER)) as min_their_snr,
                 MAX(dm.timestamp) as last_contact,
-                COUNT(dm.id) as contact_count
+                COUNT(dm.id) as contact_count,
+                GROUP_CONCAT(DISTINCT dm.band) as bands
             FROM callsign_grids cg
             LEFT JOIN directed_messages dm ON cg.callsign = dm.callsign
             GROUP BY cg.callsign, cg.grid
@@ -254,6 +261,40 @@ class Database:
         cursor.execute("SELECT COUNT(*) FROM directed_messages")
         return cursor.fetchone()[0]
 
+    def delete_message(self, message_id: int):
+        """Delete a single message by ID."""
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM directed_messages WHERE id = ?", (message_id,))
+        self.conn.commit()
+
+    def delete_messages(self, message_ids: list):
+        """Delete multiple messages by ID (batch delete)."""
+        if not message_ids:
+            return
+        cursor = self.conn.cursor()
+        placeholders = ",".join("?" * len(message_ids))
+        cursor.execute(f"DELETE FROM directed_messages WHERE id IN ({placeholders})", message_ids)
+        self.conn.commit()
+
+    def delete_callsign_grid(self, callsign: str):
+        """Delete just the callsign-grid mapping."""
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM callsign_grids WHERE callsign = ?", (callsign,))
+        self.conn.commit()
+
+    def delete_callsign_with_messages(self, callsign: str):
+        """Delete callsign grid entry AND all messages for that callsign."""
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM directed_messages WHERE callsign = ?", (callsign,))
+        cursor.execute("DELETE FROM callsign_grids WHERE callsign = ?", (callsign,))
+        self.conn.commit()
+
+    def get_message_count_for_callsign(self, callsign: str) -> int:
+        """Get count of messages for a callsign."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM directed_messages WHERE callsign = ?", (callsign,))
+        return cursor.fetchone()[0]
+
     def get_setting(self, key: str, default: str = "") -> str:
         """Get a setting value."""
         cursor = self.conn.cursor()
@@ -281,7 +322,7 @@ class Database:
         # Sheet 1: Directed Messages
         ws1 = wb.active
         ws1.title = "Directed Messages"
-        ws1.append(["Callsign", "QRZ", "Timestamp (UTC)", "My SNR of Them", "Their SNR of Me", "Message"])
+        ws1.append(["Callsign", "QRZ", "Timestamp (UTC)", "Band", "My SNR of Them", "Their SNR of Me", "Message"])
 
         for msg in self.get_all_messages():
             callsign = msg["callsign"]
@@ -290,6 +331,7 @@ class Database:
                 callsign,
                 qrz_url,
                 msg["timestamp"],
+                msg.get("band", ""),
                 format_snr(msg["my_snr_of_them"]),
                 format_snr(msg["their_snr_of_me"]),
                 msg["message"]
@@ -298,22 +340,28 @@ class Database:
         ws1.column_dimensions["A"].width = 12
         ws1.column_dimensions["B"].width = 35
         ws1.column_dimensions["C"].width = 20
-        ws1.column_dimensions["D"].width = 15
+        ws1.column_dimensions["D"].width = 8
         ws1.column_dimensions["E"].width = 15
-        ws1.column_dimensions["F"].width = 50
+        ws1.column_dimensions["F"].width = 15
+        ws1.column_dimensions["G"].width = 50
 
         # Sheet 2: Callsign Grids with SNR stats
         ws2 = wb.create_sheet("Callsign Grids")
-        ws2.append(["Callsign", "QRZ", "Grid", "Max My SNR", "Min My SNR",
+        ws2.append(["Callsign", "QRZ", "Grid", "Bands", "Max My SNR", "Min My SNR",
                     "Max Their SNR", "Min Their SNR", "Last Contact"])
 
         for entry in self.get_grids_with_snr_stats():
             callsign = entry["callsign"]
             qrz_url = f"https://www.qrz.com/db/{callsign}" if callsign else ""
+            # Format bands - filter out empty strings and join
+            bands = entry.get("bands", "") or ""
+            bands_list = [b for b in bands.split(",") if b]
+            bands_formatted = ", ".join(sorted(set(bands_list)))
             ws2.append([
                 callsign,
                 qrz_url,
                 entry["grid"],
+                bands_formatted,
                 format_snr(entry["max_my_snr"]),
                 format_snr(entry["min_my_snr"]),
                 format_snr(entry["max_their_snr"]),
@@ -324,11 +372,12 @@ class Database:
         ws2.column_dimensions["A"].width = 12
         ws2.column_dimensions["B"].width = 35
         ws2.column_dimensions["C"].width = 8
-        ws2.column_dimensions["D"].width = 12
+        ws2.column_dimensions["D"].width = 15
         ws2.column_dimensions["E"].width = 12
-        ws2.column_dimensions["F"].width = 14
+        ws2.column_dimensions["F"].width = 12
         ws2.column_dimensions["G"].width = 14
-        ws2.column_dimensions["H"].width = 12
+        ws2.column_dimensions["H"].width = 14
+        ws2.column_dimensions["I"].width = 12
 
         wb.save(output_path)
         return True

@@ -122,13 +122,18 @@ class JS8RecorderApp:
         messages_frame = ttk.Frame(self.notebook)
         self.notebook.add(messages_frame, text="Directed Messages")
 
+        # Container for treeview and scrollbar
+        msg_tree_frame = ttk.Frame(messages_frame)
+        msg_tree_frame.pack(fill=tk.BOTH, expand=True)
+
         # Messages treeview
-        msg_columns = ("callsign", "qrz", "timestamp", "my_snr", "their_snr", "message")
-        self.messages_tree = ttk.Treeview(messages_frame, columns=msg_columns, show="headings")
+        msg_columns = ("callsign", "qrz", "timestamp", "band", "my_snr", "their_snr", "message")
+        self.messages_tree = ttk.Treeview(msg_tree_frame, columns=msg_columns, show="headings")
 
         self.messages_tree.heading("callsign", text="Callsign")
         self.messages_tree.heading("qrz", text="QRZ")
         self.messages_tree.heading("timestamp", text="Timestamp (UTC)")
+        self.messages_tree.heading("band", text="Band")
         self.messages_tree.heading("my_snr", text="My SNR of Them")
         self.messages_tree.heading("their_snr", text="Their SNR of Me")
         self.messages_tree.heading("message", text="Message")
@@ -136,19 +141,31 @@ class JS8RecorderApp:
         self.messages_tree.column("callsign", width=80)
         self.messages_tree.column("qrz", width=50)
         self.messages_tree.column("timestamp", width=140)
+        self.messages_tree.column("band", width=50)
         self.messages_tree.column("my_snr", width=100)
         self.messages_tree.column("their_snr", width=100)
-        self.messages_tree.column("message", width=300)
+        self.messages_tree.column("message", width=280)
 
         # Scrollbar for messages
-        msg_scroll = ttk.Scrollbar(messages_frame, orient=tk.VERTICAL, command=self.messages_tree.yview)
+        msg_scroll = ttk.Scrollbar(msg_tree_frame, orient=tk.VERTICAL, command=self.messages_tree.yview)
         self.messages_tree.configure(yscrollcommand=msg_scroll.set)
 
         self.messages_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         msg_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # Bind double-click on QRZ column
+        # Button frame for messages tab
+        msg_button_frame = ttk.Frame(messages_frame, padding="5")
+        msg_button_frame.pack(fill=tk.X)
+        ttk.Button(msg_button_frame, text="Delete Selected", command=self._delete_selected_messages).pack(side=tk.LEFT)
+
+        # Context menu for messages
+        self.messages_menu = tk.Menu(self.root, tearoff=0)
+        self.messages_menu.add_command(label="Delete Selected", command=self._delete_selected_messages)
+
+        # Bind events
         self.messages_tree.bind("<Double-1>", self._on_tree_double_click)
+        self.messages_tree.bind("<Button-3>", self._show_messages_menu)
+        self.messages_tree.bind("<Delete>", lambda e: self._delete_selected_messages())
 
         # Tag for messages received during this session
         self.messages_tree.tag_configure("session", background="#d4edda")
@@ -157,13 +174,18 @@ class JS8RecorderApp:
         grids_frame = ttk.Frame(self.notebook)
         self.notebook.add(grids_frame, text="Callsign Grids")
 
+        # Container for treeview and scrollbar
+        grid_tree_frame = ttk.Frame(grids_frame)
+        grid_tree_frame.pack(fill=tk.BOTH, expand=True)
+
         # Grids treeview
-        grid_columns = ("callsign", "qrz", "grid", "max_my", "min_my", "max_their", "min_their", "last")
-        self.grids_tree = ttk.Treeview(grids_frame, columns=grid_columns, show="headings")
+        grid_columns = ("callsign", "qrz", "grid", "bands", "max_my", "min_my", "max_their", "min_their", "last")
+        self.grids_tree = ttk.Treeview(grid_tree_frame, columns=grid_columns, show="headings")
 
         self.grids_tree.heading("callsign", text="Callsign")
         self.grids_tree.heading("qrz", text="QRZ")
         self.grids_tree.heading("grid", text="Grid")
+        self.grids_tree.heading("bands", text="Bands")
         self.grids_tree.heading("max_my", text="Max My SNR")
         self.grids_tree.heading("min_my", text="Min My SNR")
         self.grids_tree.heading("max_their", text="Max Their SNR")
@@ -173,21 +195,33 @@ class JS8RecorderApp:
         self.grids_tree.column("callsign", width=80)
         self.grids_tree.column("qrz", width=40)
         self.grids_tree.column("grid", width=60)
-        self.grids_tree.column("max_my", width=85)
-        self.grids_tree.column("min_my", width=85)
-        self.grids_tree.column("max_their", width=95)
-        self.grids_tree.column("min_their", width=95)
+        self.grids_tree.column("bands", width=80)
+        self.grids_tree.column("max_my", width=80)
+        self.grids_tree.column("min_my", width=80)
+        self.grids_tree.column("max_their", width=90)
+        self.grids_tree.column("min_their", width=90)
         self.grids_tree.column("last", width=80)
 
         # Scrollbar for grids
-        grid_scroll = ttk.Scrollbar(grids_frame, orient=tk.VERTICAL, command=self.grids_tree.yview)
+        grid_scroll = ttk.Scrollbar(grid_tree_frame, orient=tk.VERTICAL, command=self.grids_tree.yview)
         self.grids_tree.configure(yscrollcommand=grid_scroll.set)
 
         self.grids_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         grid_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # Bind double-click on grids tree
+        # Button frame for grids tab
+        grid_button_frame = ttk.Frame(grids_frame, padding="5")
+        grid_button_frame.pack(fill=tk.X)
+        ttk.Button(grid_button_frame, text="Delete Selected", command=self._delete_selected_grids).pack(side=tk.LEFT)
+
+        # Context menu for grids
+        self.grids_menu = tk.Menu(self.root, tearoff=0)
+        self.grids_menu.add_command(label="Delete Selected", command=self._delete_selected_grids)
+
+        # Bind events
         self.grids_tree.bind("<Double-1>", self._on_grids_tree_double_click)
+        self.grids_tree.bind("<Button-3>", self._show_grids_menu)
+        self.grids_tree.bind("<Delete>", lambda e: self._delete_selected_grids())
 
         # Lookup tab
         lookup_frame = ttk.Frame(self.notebook)
@@ -295,10 +329,12 @@ class JS8RecorderApp:
             self.messages_tree.delete(item)
 
         for msg in self.db.get_all_messages():
-            self.messages_tree.insert("", 0, values=(
+            # Store the database ID as the item ID for deletion support
+            self.messages_tree.insert("", 0, iid=str(msg["id"]), values=(
                 msg["callsign"],
                 "Link",
                 msg["timestamp"],
+                msg.get("band", ""),
                 format_snr(msg["my_snr_of_them"]),
                 format_snr(msg["their_snr_of_me"]),
                 msg["message"]
@@ -309,10 +345,15 @@ class JS8RecorderApp:
             self.grids_tree.delete(item)
 
         for entry in self.db.get_grids_with_snr_stats():
+            # Format bands - filter out empty strings and join
+            bands = entry.get("bands", "") or ""
+            bands_list = [b for b in bands.split(",") if b]
+            bands_formatted = ", ".join(sorted(set(bands_list)))
             self.grids_tree.insert("", tk.END, values=(
                 entry["callsign"],
                 "Link",
                 entry["grid"],
+                bands_formatted,
                 format_snr(entry["max_my_snr"]),
                 format_snr(entry["min_my_snr"]),
                 format_snr(entry["max_their_snr"]),
@@ -494,7 +535,7 @@ class JS8RecorderApp:
             ))
 
         total = len(exact_results) + len(adjacent_results)
-        self.status_var.set(f"Found {len(exact_results)} in {grid}* + {len(adjacent_results)} adjacent = {total} callsign(s)")
+        self.status_var.set(f"Found {len(exact_results)} in {grid}* + {len(adjacent_results)} adjacent = {total} {'callsign' if total == 1 else 'callsigns'}")
 
     # Thread-safe callbacks using queue
     def _on_message(self, record: dict):
@@ -520,21 +561,24 @@ class JS8RecorderApp:
                 msg_type, data = self.msg_queue.get_nowait()
 
                 if msg_type == "message":
-                    # Add to database
-                    self.db.add_message(
+                    # Add to database and get the new ID
+                    msg_id = self.db.add_message(
                         data["callsign"],
                         data["timestamp"],
                         data["my_snr_of_them"],
                         data["their_snr_of_me"],
-                        data["message"]
+                        data["message"],
+                        data.get("band", "")
                     )
                     # Ensure callsign is in grids table (updates grid if provided)
                     self.db.add_grid(data["callsign"], data.get("grid", ""))
                     # Add to treeview at top (highlighted as session message)
-                    self.messages_tree.insert("", 0, values=(
+                    # Use the database ID as the item ID for deletion support
+                    self.messages_tree.insert("", 0, iid=str(msg_id), values=(
                         data["callsign"],
                         "Link",
                         data["timestamp"],
+                        data.get("band", ""),
                         format_snr(data["my_snr_of_them"]),
                         format_snr(data["their_snr_of_me"]),
                         data["message"]
@@ -572,10 +616,15 @@ class JS8RecorderApp:
             self.grids_tree.delete(item)
 
         for entry in self.db.get_grids_with_snr_stats():
+            # Format bands - filter out empty strings and join
+            bands = entry.get("bands", "") or ""
+            bands_list = [b for b in bands.split(",") if b]
+            bands_formatted = ", ".join(sorted(set(bands_list)))
             self.grids_tree.insert("", tk.END, values=(
                 entry["callsign"],
                 "Link",
                 entry["grid"],
+                bands_formatted,
                 format_snr(entry["max_my_snr"]),
                 format_snr(entry["min_my_snr"]),
                 format_snr(entry["max_their_snr"]),
@@ -632,6 +681,159 @@ class JS8RecorderApp:
             self.map_markers.append(marker)
 
         self.status_var.set(f"Map updated with {len(self.map_markers)} locations")
+
+    def _show_messages_menu(self, event):
+        """Show context menu for messages tree."""
+        # Select item under cursor if not already selected
+        item = self.messages_tree.identify_row(event.y)
+        if item:
+            if item not in self.messages_tree.selection():
+                self.messages_tree.selection_set(item)
+            self.messages_menu.tk_popup(event.x_root, event.y_root)
+
+    def _show_grids_menu(self, event):
+        """Show context menu for grids tree."""
+        # Select item under cursor if not already selected
+        item = self.grids_tree.identify_row(event.y)
+        if item:
+            if item not in self.grids_tree.selection():
+                self.grids_tree.selection_set(item)
+            self.grids_menu.tk_popup(event.x_root, event.y_root)
+
+    def _delete_selected_messages(self):
+        """Delete selected messages from the database."""
+        selected = self.messages_tree.selection()
+        if not selected:
+            self.status_var.set("No messages selected")
+            return
+
+        count = len(selected)
+        if not messagebox.askyesno(
+            "Confirm Delete",
+            f"Delete {count} selected message{'s' if count != 1 else ''}?"
+        ):
+            return
+
+        # Get IDs (item IDs are the database IDs as strings)
+        message_ids = [int(item_id) for item_id in selected]
+
+        # Delete from database
+        self.db.delete_messages(message_ids)
+
+        # Remove from treeview
+        for item_id in selected:
+            self.messages_tree.delete(item_id)
+
+        # Update count and refresh grids (SNR stats may have changed)
+        count = self.db.get_message_count()
+        self.count_var.set(f"{count} message{'s' if count != 1 else ''}")
+        self._refresh_grids_table()
+        self.status_var.set(f"Deleted {len(message_ids)} {'message' if len(message_ids) == 1 else 'messages'}")
+
+    def _delete_selected_grids(self):
+        """Delete selected callsign grids from the database."""
+        selected = self.grids_tree.selection()
+        if not selected:
+            self.status_var.set("No callsigns selected")
+            return
+
+        # Get callsigns from selected items
+        callsigns = []
+        for item_id in selected:
+            values = self.grids_tree.item(item_id, "values")
+            if values:
+                callsigns.append(values[0])  # First column is callsign
+
+        if not callsigns:
+            return
+
+        # Get total message count for these callsigns
+        total_messages = sum(self.db.get_message_count_for_callsign(cs) for cs in callsigns)
+
+        # Ask user what to delete
+        if total_messages > 0:
+            result = self._show_delete_dialog(len(callsigns), total_messages)
+
+            if result == "cancel":
+                return
+            elif result == "all":
+                for callsign in callsigns:
+                    self.db.delete_callsign_with_messages(callsign)
+                self.status_var.set(f"Deleted {len(callsigns)} {'callsign' if len(callsigns) == 1 else 'callsigns'} and {total_messages} {'message' if total_messages == 1 else 'messages'}")
+            elif result == "grids_only":
+                for callsign in callsigns:
+                    self.db.delete_callsign_grid(callsign)
+                self.status_var.set(f"Deleted {len(callsigns)} grid {'entry' if len(callsigns) == 1 else 'entries'} (messages kept)")
+        else:
+            # No messages, just confirm grid deletion
+            if not messagebox.askyesno(
+                "Confirm Delete",
+                f"Delete {len(callsigns)} callsign grid {'entry' if len(callsigns) == 1 else 'entries'}?"
+            ):
+                return
+            for callsign in callsigns:
+                self.db.delete_callsign_grid(callsign)
+            self.status_var.set(f"Deleted {len(callsigns)} grid {'entry' if len(callsigns) == 1 else 'entries'}")
+
+        # Refresh both tables
+        self._refresh_tables()
+
+    def _show_delete_dialog(self, num_callsigns: int, num_messages: int) -> str:
+        """Show custom delete dialog with descriptive buttons. Returns 'all', 'grids_only', or 'cancel'."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Delete Options")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        result = {"value": "cancel"}
+
+        # Message
+        cs_word = "callsign" if num_callsigns == 1 else "callsigns"
+        msg_word = "message" if num_messages == 1 else "messages"
+        ttk.Label(
+            dialog,
+            text=f"Delete {num_callsigns} {cs_word} with {num_messages} associated {msg_word}.",
+            padding="15 15 15 5"
+        ).pack()
+
+        # Buttons frame
+        btn_frame = ttk.Frame(dialog, padding="10")
+        btn_frame.pack(fill=tk.X)
+
+        def set_result(val):
+            result["value"] = val
+            dialog.destroy()
+
+        ttk.Button(
+            btn_frame,
+            text="Delete grids AND messages",
+            command=lambda: set_result("all")
+        ).pack(fill=tk.X, pady=2)
+
+        ttk.Button(
+            btn_frame,
+            text="Delete grids only (keep messages)",
+            command=lambda: set_result("grids_only")
+        ).pack(fill=tk.X, pady=2)
+
+        ttk.Button(
+            btn_frame,
+            text="Cancel",
+            command=lambda: set_result("cancel")
+        ).pack(fill=tk.X, pady=2)
+
+        # Center dialog on parent
+        dialog.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() - dialog.winfo_width()) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - dialog.winfo_height()) // 2
+        dialog.geometry(f"+{x}+{y}")
+
+        # Handle window close button
+        dialog.protocol("WM_DELETE_WINDOW", lambda: set_result("cancel"))
+
+        self.root.wait_window(dialog)
+        return result["value"]
 
     def _on_close(self):
         """Handle window close."""

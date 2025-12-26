@@ -19,6 +19,28 @@ def _parse_snr(value) -> str:
         return ""
 
 
+def freq_to_band(freq_hz: int) -> str:
+    """Convert frequency in Hz to band name."""
+    if not freq_hz:
+        return ""
+    bands = [
+        (1800000, 2000000, "160m"),
+        (3500000, 4000000, "80m"),
+        (5330500, 5405000, "60m"),
+        (7000000, 7300000, "40m"),
+        (10100000, 10150000, "30m"),
+        (14000000, 14350000, "20m"),
+        (18068000, 18168000, "17m"),
+        (21000000, 21450000, "15m"),
+        (24890000, 24990000, "12m"),
+        (28000000, 29700000, "10m"),
+    ]
+    for low, high, name in bands:
+        if low <= freq_hz <= high:
+            return name
+    return ""
+
+
 class JS8Client:
     def __init__(self, host: str = "127.0.0.1", port: int = 2442, my_callsign: str = ""):
         self.host = host
@@ -113,6 +135,10 @@ class JS8Client:
         grid = params.get("GRID", "").strip()
         snr = _parse_snr(params.get("SNR", ""))
 
+        # Extract band from dial frequency
+        dial_freq = params.get("DIAL", 0)
+        band = freq_to_band(dial_freq)
+
         # UTC timestamp
         utc = params.get("UTC", "")
         if utc:
@@ -134,7 +160,8 @@ class JS8Client:
             "my_snr_of_them": snr,
             "their_snr_of_me": their_snr_of_me,
             "message": value,
-            "grid": grid
+            "grid": grid,
+            "band": band
         }
 
         if self.on_message:
