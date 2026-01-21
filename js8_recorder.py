@@ -465,10 +465,24 @@ class JS8RecorderApp:
         item = self.grids_tree.identify_row(event.y)
         column = self.grids_tree.identify_column(event.x)
 
-        if item and column == "#2":  # QRZ column
-            values = self.grids_tree.item(item, "values")
-            if values and values[0]:
+        if not item:
+            return
+
+        values = self.grids_tree.item(item, "values")
+        if not values:
+            return
+
+        if column == "#2":  # QRZ column
+            if values[0]:
                 self._open_qrz(values[0])
+        elif column == "#3":  # Grid column
+            callsign = values[0]
+            current_grid = values[2] if values[2] else ""
+            new_grid = self._edit_grid_dialog(callsign, current_grid)
+            if new_grid is not None:  # None means cancelled, empty string means clear
+                self.db.update_grid(callsign, new_grid)
+                self._refresh_grids_table()
+                self.status_var.set(f"Updated grid for {callsign}")
 
     def _on_lookup_tree_double_click(self, event):
         """Handle double-click on lookup treeview."""
@@ -777,6 +791,61 @@ class JS8RecorderApp:
 
         # Refresh both tables
         self._refresh_tables()
+
+    def _edit_grid_dialog(self, callsign: str, current_grid: str) -> str:
+        """Show dialog to edit grid for a callsign. Returns new grid value or None if cancelled."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"Edit Grid for {callsign}")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        result = {"value": None}
+
+        # Label
+        ttk.Label(dialog, text="Grid Square:", padding="15 15 15 5").pack(anchor=tk.W)
+
+        # Entry field
+        grid_var = tk.StringVar(value=current_grid)
+        entry = ttk.Entry(dialog, textvariable=grid_var, width=12)
+        entry.pack(padx=15, pady=(0, 10))
+        entry.select_range(0, tk.END)
+        entry.focus_set()
+
+        def save():
+            new_grid = grid_var.get().strip().upper()
+            # Optional validation: 4+ alphanumeric chars or empty
+            if new_grid and (len(new_grid) < 4 or not new_grid[:4].isalnum()):
+                messagebox.showwarning("Invalid Grid", "Grid must be at least 4 alphanumeric characters (e.g., EM48)")
+                return
+            result["value"] = new_grid
+            dialog.destroy()
+
+        def cancel():
+            dialog.destroy()
+
+        # Buttons frame
+        btn_frame = ttk.Frame(dialog, padding="10")
+        btn_frame.pack(fill=tk.X)
+
+        ttk.Button(btn_frame, text="Save", command=save).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=cancel).pack(side=tk.LEFT, padx=5)
+
+        # Bind Enter key to save
+        entry.bind("<Return>", lambda e: save())
+        dialog.bind("<Escape>", lambda e: cancel())
+
+        # Center dialog on parent
+        dialog.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() - dialog.winfo_width()) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - dialog.winfo_height()) // 2
+        dialog.geometry(f"+{x}+{y}")
+
+        # Handle window close button
+        dialog.protocol("WM_DELETE_WINDOW", cancel)
+
+        self.root.wait_window(dialog)
+        return result["value"]
 
     def _show_delete_dialog(self, num_callsigns: int, num_messages: int) -> str:
         """Show custom delete dialog with descriptive buttons. Returns 'all', 'grids_only', or 'cancel'."""

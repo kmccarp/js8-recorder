@@ -1,0 +1,5 @@
+# js8-recorder uses only Python standard library modules.
+# No external dependencies required.
+#
+# Required Python version: 3.10+
+# (uses match statements and modern type hints)

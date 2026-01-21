@@ -195,6 +195,15 @@ class Database:
             """, (callsign, now))
         self.conn.commit()
 
+    def update_grid(self, callsign: str, grid: str):
+        """Update grid for a callsign (allows setting to empty)."""
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            UPDATE callsign_grids SET grid = ?, updated_at = ?
+            WHERE callsign = ?
+        """, (grid, datetime.utcnow().isoformat(), callsign))
+        self.conn.commit()
+
     def get_all_messages(self) -> list:
         """Get all directed messages, oldest first (for display with newest at top)."""
         cursor = self.conn.cursor()
