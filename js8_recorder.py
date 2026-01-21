@@ -798,19 +798,20 @@ class JS8RecorderApp:
         dialog.title(f"Edit Grid for {callsign}")
         dialog.transient(self.root)
         dialog.grab_set()
-        dialog.resizable(False, False)
 
         result = {"value": None}
 
+        # Main frame to hold all content
+        main_frame = ttk.Frame(dialog, padding=15)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
         # Label
-        ttk.Label(dialog, text="Grid Square:", padding="15 15 15 5").pack(anchor=tk.W)
+        ttk.Label(main_frame, text="Grid Square:").pack(anchor=tk.W)
 
         # Entry field
         grid_var = tk.StringVar(value=current_grid)
-        entry = ttk.Entry(dialog, textvariable=grid_var, width=12)
-        entry.pack(padx=15, pady=(0, 10))
-        entry.select_range(0, tk.END)
-        entry.focus_set()
+        entry = ttk.Entry(main_frame, textvariable=grid_var, width=12)
+        entry.pack(anchor=tk.W, pady=(5, 15))
 
         def save():
             new_grid = grid_var.get().strip().upper()
@@ -825,14 +826,21 @@ class JS8RecorderApp:
             dialog.destroy()
 
         # Buttons frame
-        btn_frame = ttk.Frame(dialog, padding="10")
+        btn_frame = ttk.Frame(main_frame)
         btn_frame.pack(fill=tk.X)
 
-        ttk.Button(btn_frame, text="Save", command=save).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Cancel", command=cancel).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Save", command=save).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(btn_frame, text="Cancel", command=cancel).pack(side=tk.LEFT)
+
+        # Set minimum size and let it auto-size
+        dialog.update_idletasks()
+        dialog.minsize(dialog.winfo_width(), dialog.winfo_height())
+        dialog.resizable(False, False)
 
         # Bind Enter key to save
         entry.bind("<Return>", lambda e: save())
+        entry.select_range(0, tk.END)
+        entry.focus_set()
         dialog.bind("<Escape>", lambda e: cancel())
 
         # Center dialog on parent
