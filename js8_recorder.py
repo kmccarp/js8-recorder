@@ -797,6 +797,11 @@ class JS8RecorderApp:
         dialog = tk.Toplevel(self.root)
         dialog.title(f"Edit Grid for {callsign}")
         dialog.transient(self.root)
+
+        # Set initial geometry before adding widgets (fixes Linux rendering)
+        dialog.geometry("200x120")
+        dialog.update()
+
         dialog.grab_set()
 
         result = {"value": None}
@@ -810,7 +815,7 @@ class JS8RecorderApp:
 
         # Entry field
         grid_var = tk.StringVar(value=current_grid)
-        entry = ttk.Entry(main_frame, textvariable=grid_var, width=12)
+        entry = tk.Entry(main_frame, textvariable=grid_var, width=12)
         entry.pack(anchor=tk.W, pady=(5, 15))
 
         def save():
