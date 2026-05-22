@@ -244,26 +244,60 @@ class Database:
         """)
         return [dict(row) for row in cursor.fetchall()]
 
-    def get_grids_with_snr_stats(self) -> list:
-        """Get all callsign-grid mappings with SNR statistics and bands."""
+    def get_grids_with_snr_stats(self, bands=None) -> list:
+        """Get all callsign-grid mappings with SNR statistics and bands.
+
+        If `bands` is a non-empty iterable, the aggregates only consider
+        messages on those bands AND callsigns with no matching messages are
+        excluded (the LEFT JOIN becomes an INNER JOIN semantically).
+        """
+        cursor = self.conn.cursor()
+        if bands:
+            placeholders = ",".join("?" * len(bands))
+            cursor.execute(f"""
+                SELECT
+                    cg.callsign,
+                    cg.grid,
+                    MAX(CAST(dm.my_snr_of_them AS INTEGER)) as max_my_snr,
+                    MIN(CAST(dm.my_snr_of_them AS INTEGER)) as min_my_snr,
+                    MAX(CAST(dm.their_snr_of_me AS INTEGER)) as max_their_snr,
+                    MIN(CAST(dm.their_snr_of_me AS INTEGER)) as min_their_snr,
+                    MAX(dm.timestamp) as last_contact,
+                    COUNT(dm.id) as contact_count,
+                    GROUP_CONCAT(DISTINCT dm.band) as bands
+                FROM callsign_grids cg
+                INNER JOIN directed_messages dm ON cg.callsign = dm.callsign
+                WHERE dm.band IN ({placeholders})
+                GROUP BY cg.callsign, cg.grid
+                ORDER BY cg.callsign
+            """, list(bands))
+        else:
+            cursor.execute("""
+                SELECT
+                    cg.callsign,
+                    cg.grid,
+                    MAX(CAST(dm.my_snr_of_them AS INTEGER)) as max_my_snr,
+                    MIN(CAST(dm.my_snr_of_them AS INTEGER)) as min_my_snr,
+                    MAX(CAST(dm.their_snr_of_me AS INTEGER)) as max_their_snr,
+                    MIN(CAST(dm.their_snr_of_me AS INTEGER)) as min_their_snr,
+                    MAX(dm.timestamp) as last_contact,
+                    COUNT(dm.id) as contact_count,
+                    GROUP_CONCAT(DISTINCT dm.band) as bands
+                FROM callsign_grids cg
+                LEFT JOIN directed_messages dm ON cg.callsign = dm.callsign
+                GROUP BY cg.callsign, cg.grid
+                ORDER BY cg.callsign
+            """)
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_distinct_bands(self) -> list:
+        """Return the distinct non-empty band values seen in messages."""
         cursor = self.conn.cursor()
         cursor.execute("""
-            SELECT
-                cg.callsign,
-                cg.grid,
-                MAX(CAST(dm.my_snr_of_them AS INTEGER)) as max_my_snr,
-                MIN(CAST(dm.my_snr_of_them AS INTEGER)) as min_my_snr,
-                MAX(CAST(dm.their_snr_of_me AS INTEGER)) as max_their_snr,
-                MIN(CAST(dm.their_snr_of_me AS INTEGER)) as min_their_snr,
-                MAX(dm.timestamp) as last_contact,
-                COUNT(dm.id) as contact_count,
-                GROUP_CONCAT(DISTINCT dm.band) as bands
-            FROM callsign_grids cg
-            LEFT JOIN directed_messages dm ON cg.callsign = dm.callsign
-            GROUP BY cg.callsign, cg.grid
-            ORDER BY cg.callsign
+            SELECT DISTINCT band FROM directed_messages
+            WHERE band IS NOT NULL AND band != ''
         """)
-        return [dict(row) for row in cursor.fetchall()]
+        return [row[0] for row in cursor.fetchall()]
 
     def lookup_by_grid(self, grid: str) -> list:
         """Find callsigns by grid square, sorted by likelihood to hear you."""

@@ -10,6 +10,7 @@ import queue
 import subprocess
 import platform
 import time
+from datetime import datetime
 from pathlib import Path
 
 from database import Database, format_snr, format_age, get_adjacent_grids, grid_to_latlon
@@ -33,8 +34,24 @@ DEFAULT_SNR_THRESHOLDS = [
     {"min_snr": -20,  "color": "orange", "label": "Marginal (-11 to -20 dB)"},
     {"min_snr": -999, "color": "red",    "label": "Weak (< -20 dB)"},
 ]
+
+# Map marker color tiers when coloring by recency, ordered most-recent to
+# oldest. Each tier colors any contact age <= max_age_hours that didn't
+# match a higher tier. The final tier (max_age_hours = None) catches the
+# rest. Same shape as DEFAULT_SNR_THRESHOLDS so a future edit dialog can
+# treat them uniformly.
+DEFAULT_AGE_THRESHOLDS = [
+    {"max_age_hours": 24,       "color": "green",  "label": "≤ 1 day ago"},
+    {"max_age_hours": 24 * 7,   "color": "yellow", "label": "≤ 1 week ago"},
+    {"max_age_hours": 24 * 30,  "color": "orange", "label": "≤ 1 month ago"},
+    {"max_age_hours": None,     "color": "red",    "label": "> 1 month ago"},
+]
+
+COLOR_MODE_SNR = "SNR"
+COLOR_MODE_AGE = "Last contact"
+
 NO_DATA_COLOR = "gray"
-NO_DATA_LABEL = "No SNR data"
+NO_DATA_LABEL = "No data"
 
 
 class JS8RecorderApp:
@@ -47,9 +64,15 @@ class JS8RecorderApp:
         # Initialize database
         self.db = Database()
 
-        # Per-instance copy so a future edit dialog can mutate without
-        # touching the module default.
+        # Per-instance copies so a future edit dialog can mutate without
+        # touching the module defaults.
         self.snr_thresholds = [dict(t) for t in DEFAULT_SNR_THRESHOLDS]
+        self.age_thresholds = [dict(t) for t in DEFAULT_AGE_THRESHOLDS]
+        self.color_mode_var = tk.StringVar(value=COLOR_MODE_SNR)
+
+        # Band filter state. Empty / all-selected both mean "no filter".
+        self.band_filter_vars = {}  # band -> tk.BooleanVar
+        self.band_filter_label = tk.StringVar(value="Bands: all")
 
         # Initialize JS8 client
         self.client = JS8Client()
@@ -325,12 +348,36 @@ class JS8RecorderApp:
             map_controls.pack(fill=tk.X)
 
             ttk.Button(map_controls, text="Refresh Map", command=self._refresh_map).pack(side=tk.LEFT)
+
+            ttk.Label(map_controls, text="Color by:").pack(side=tk.LEFT, padx=(10, 4))
+            color_mode_box = ttk.Combobox(
+                map_controls,
+                textvariable=self.color_mode_var,
+                values=(COLOR_MODE_SNR, COLOR_MODE_AGE),
+                state="readonly",
+                width=14,
+            )
+            color_mode_box.pack(side=tk.LEFT)
+            color_mode_box.bind("<<ComboboxSelected>>", self._on_color_mode_change)
+
             ttk.Checkbutton(
                 map_controls,
                 text="Show grid squares",
                 variable=self.show_grids_var,
                 command=self._refresh_grid_overlays,
             ).pack(side=tk.LEFT, padx=(10, 0))
+
+            # Band filter — multi-select via a checkbutton menu so it fits
+            # neatly inline. _sync_band_menu populates it from the DB.
+            self.band_filter_btn = ttk.Menubutton(
+                map_controls,
+                textvariable=self.band_filter_label,
+            )
+            self.band_filter_btn.pack(side=tk.LEFT, padx=(10, 0))
+            self.band_menu = tk.Menu(self.band_filter_btn, tearoff=False)
+            self.band_filter_btn["menu"] = self.band_menu
+            self._sync_band_menu(self.db.get_distinct_bands())
+
             # Shown only when grids are enabled but suppressed by zoom level.
             ttk.Label(
                 map_controls,
@@ -338,10 +385,13 @@ class JS8RecorderApp:
                 foreground="#888888",
             ).pack(side=tk.LEFT, padx=(4, 0))
 
-            # Legend lives in its own container so _build_legend can
-            # clear and rebuild it when thresholds are edited.
-            self.legend_frame = ttk.Frame(map_controls)
-            self.legend_frame.pack(side=tk.LEFT, padx=(15, 0))
+            # Legend gets its own row beneath the controls — the controls
+            # row was getting crowded. _build_legend can clear and rebuild
+            # this frame in place when thresholds/mode change.
+            legend_row = ttk.Frame(map_frame, padding="5 0 5 5")
+            legend_row.pack(fill=tk.X)
+            self.legend_frame = ttk.Frame(legend_row)
+            self.legend_frame.pack(side=tk.LEFT)
             self._build_legend()
 
             # Map widget
@@ -761,8 +811,107 @@ class JS8RecorderApp:
                 return tier["color"]
         return self.snr_thresholds[-1]["color"]
 
+    def _age_to_color(self, timestamp_str) -> str:
+        """Map a 'YYYY-MM-DD HH:MM:SS' UTC timestamp to a recency color."""
+        if not timestamp_str:
+            return NO_DATA_COLOR
+        try:
+            dt = datetime.strptime(str(timestamp_str), "%Y-%m-%d %H:%M:%S")
+        except (ValueError, TypeError):
+            return NO_DATA_COLOR
+        hours = (datetime.utcnow() - dt).total_seconds() / 3600.0
+        for tier in self.age_thresholds:
+            limit = tier["max_age_hours"]
+            if limit is None or hours <= limit:
+                return tier["color"]
+        return self.age_thresholds[-1]["color"]
+
+    def _entry_metric(self, entry):
+        """Pull the metric the current color mode cares about from a row of
+        get_grids_with_snr_stats(). String timestamps sort correctly with > so
+        'newer' == 'greater' for both metric types."""
+        if self.color_mode_var.get() == COLOR_MODE_AGE:
+            return entry["last_contact"]
+        return entry["max_their_snr"]
+
+    def _metric_to_color(self, metric) -> str:
+        """Dispatch on the current color mode."""
+        if self.color_mode_var.get() == COLOR_MODE_AGE:
+            return self._age_to_color(metric)
+        return self._snr_to_color(metric)
+
+    def _on_color_mode_change(self, event=None):
+        """Rebuild the legend and recolor everything when the user switches mode."""
+        self._build_legend()
+        self._refresh_map()
+
+    # --- Band filter ---
+
+    def _sync_band_menu(self, bands):
+        """(Re)populate the band-filter dropdown, preserving prior selections."""
+        bands = sorted(set(bands))
+        self.band_menu.delete(0, tk.END)
+
+        # Drop vars for bands no longer present in the DB.
+        for stale in [b for b in self.band_filter_vars if b not in bands]:
+            del self.band_filter_vars[stale]
+
+        if not bands:
+            self.band_menu.add_command(label="(no bands seen yet)", state="disabled")
+            self._update_band_label()
+            return
+
+        self.band_menu.add_command(label="Select all", command=self._select_all_bands)
+        self.band_menu.add_command(label="Clear", command=self._clear_band_selection)
+        self.band_menu.add_separator()
+        for band in bands:
+            if band not in self.band_filter_vars:
+                self.band_filter_vars[band] = tk.BooleanVar(value=False)
+            self.band_menu.add_checkbutton(
+                label=band,
+                variable=self.band_filter_vars[band],
+                command=self._on_band_filter_change,
+            )
+        self._update_band_label()
+
+    def _get_band_filter(self):
+        """Return the active band list, or None for 'no filter'.
+
+        Treat both 'nothing selected' and 'everything selected' as no filter.
+        """
+        if not self.band_filter_vars:
+            return None
+        selected = [b for b, v in self.band_filter_vars.items() if v.get()]
+        if not selected or len(selected) == len(self.band_filter_vars):
+            return None
+        return selected
+
+    def _select_all_bands(self):
+        for v in self.band_filter_vars.values():
+            v.set(True)
+        self._on_band_filter_change()
+
+    def _clear_band_selection(self):
+        for v in self.band_filter_vars.values():
+            v.set(False)
+        self._on_band_filter_change()
+
+    def _update_band_label(self):
+        active = self._get_band_filter()
+        if active is None:
+            self.band_filter_label.set("Bands: all")
+        elif len(active) <= 3:
+            self.band_filter_label.set("Bands: " + ", ".join(active))
+        else:
+            self.band_filter_label.set(f"Bands: {active[0]} +{len(active) - 1} more")
+
+    def _on_band_filter_change(self):
+        self._update_band_label()
+        self._refresh_map()
+
     def _build_legend(self):
-        """(Re)build the map color legend from self.snr_thresholds."""
+        """(Re)build the map color legend from whichever threshold table the
+        current color mode uses."""
         if not getattr(self, "legend_frame", None):
             return
 
@@ -771,7 +920,12 @@ class JS8RecorderApp:
 
         ttk.Label(self.legend_frame, text="Legend:").pack(side=tk.LEFT, padx=(0, 6))
 
-        entries = list(self.snr_thresholds) + [
+        tiers = (
+            self.age_thresholds
+            if self.color_mode_var.get() == COLOR_MODE_AGE
+            else self.snr_thresholds
+        )
+        entries = list(tiers) + [
             {"color": NO_DATA_COLOR, "label": NO_DATA_LABEL}
         ]
         for tier in entries:
@@ -1053,7 +1207,11 @@ class JS8RecorderApp:
         self.map_markers.clear()
         self.marker_clusters.clear()
 
-        entries = self.db.get_grids_with_snr_stats()
+        # Keep the band-filter menu in sync with bands actually present.
+        self._sync_band_menu(self.db.get_distinct_bands())
+
+        band_filter = self._get_band_filter()
+        entries = self.db.get_grids_with_snr_stats(bands=band_filter)
 
         by_position = {}
         for entry in entries:
@@ -1067,11 +1225,10 @@ class JS8RecorderApp:
 
             lat, lon = coords
             callsign = entry["callsign"]
-            max_their_snr = entry["max_their_snr"]
             contact_count = entry["contact_count"] or 0
 
-            # Determine marker color based on SNR (their reading of us)
-            color = self._snr_to_color(max_their_snr)
+            # Marker color is mode-dependent: SNR strength or contact recency.
+            color = self._metric_to_color(self._entry_metric(entry))
 
             # Create marker
             marker = self.map_widget.set_marker(
@@ -1155,18 +1312,22 @@ class JS8RecorderApp:
             return
         self.grid_zoom_hint_var.set("")
 
-        # Best max_their_snr per grid that has callsigns — these get
-        # SNR-colored outlines so they pop against the neutral graticule.
-        best_snr_by_grid = {}
-        for entry in self.db.get_grids_with_snr_stats():
+        # Best metric per grid (strongest SNR or most recent contact,
+        # depending on the active color mode). For both metric types
+        # "greater is better" — SNR ints compare numerically, timestamp
+        # strings compare lexically because they're 'YYYY-MM-DD HH:MM:SS'.
+        best_metric_by_grid = {}
+        for entry in self.db.get_grids_with_snr_stats(bands=self._get_band_filter()):
             g = entry["grid"]
             if not g:
                 continue
-            snr = entry["max_their_snr"]
-            if g not in best_snr_by_grid:
-                best_snr_by_grid[g] = snr
-            elif snr is not None and (best_snr_by_grid[g] is None or snr > best_snr_by_grid[g]):
-                best_snr_by_grid[g] = snr
+            metric = self._entry_metric(entry)
+            if g not in best_metric_by_grid:
+                best_metric_by_grid[g] = metric
+            elif metric is not None and (
+                best_metric_by_grid[g] is None or metric > best_metric_by_grid[g]
+            ):
+                best_metric_by_grid[g] = metric
 
         if self._grid_label_icon is None:
             self._grid_label_icon = tk.PhotoImage(width=1, height=1)
@@ -1201,8 +1362,8 @@ class JS8RecorderApp:
                     f"{lon_idx % 10}{lat_idx % 10}"
                 )
 
-                if grid in best_snr_by_grid:
-                    color = self._snr_to_color(best_snr_by_grid[grid])
+                if grid in best_metric_by_grid:
+                    color = self._metric_to_color(best_metric_by_grid[grid])
                     border = 2
                 else:
                     color = self.GRID_NEUTRAL_COLOR
