@@ -42,6 +42,25 @@ def grid_to_latlon(grid: str) -> tuple:
         return None
 
 
+def grid_to_corners(grid: str) -> list:
+    """Return the 4 (lat, lon) corners of a 4-char Maidenhead grid square.
+
+    Order is SW, SE, NE, NW (suitable for a closed polygon). Returns None
+    if the grid is invalid.
+    """
+    center = grid_to_latlon(grid)
+    if center is None:
+        return None
+    lat, lon = center
+    # Each square is 2 deg lon x 1 deg lat; center is offset by (+1, +0.5).
+    return [
+        (lat - 0.5, lon - 1),
+        (lat - 0.5, lon + 1),
+        (lat + 0.5, lon + 1),
+        (lat + 0.5, lon - 1),
+    ]
+
+
 def get_adjacent_grids(grid: str) -> list:
     """Return list of 8 adjacent grid squares for a Maidenhead grid."""
     if len(grid) < 4:

@@ -294,6 +294,12 @@ class JS8RecorderApp:
         # Map tab (only if tkintermapview is available)
         self.map_widget = None
         self.map_markers = []
+        self.grid_polygons = []
+        self.grid_labels = []
+        self._grid_refresh_after_id = None
+        self._grid_label_icon = None  # lazy: 1x1 transparent so markers render as text-only
+        self.show_grids_var = tk.BooleanVar(value=True)
+        self.grid_zoom_hint_var = tk.StringVar(value="")
         if HAS_MAP:
             map_frame = ttk.Frame(self.notebook)
             self.notebook.add(map_frame, text="Map")
@@ -303,6 +309,18 @@ class JS8RecorderApp:
             map_controls.pack(fill=tk.X)
 
             ttk.Button(map_controls, text="Refresh Map", command=self._refresh_map).pack(side=tk.LEFT)
+            ttk.Checkbutton(
+                map_controls,
+                text="Show grid squares",
+                variable=self.show_grids_var,
+                command=self._refresh_grid_overlays,
+            ).pack(side=tk.LEFT, padx=(10, 0))
+            # Shown only when grids are enabled but suppressed by zoom level.
+            ttk.Label(
+                map_controls,
+                textvariable=self.grid_zoom_hint_var,
+                foreground="#888888",
+            ).pack(side=tk.LEFT, padx=(4, 0))
 
             # Legend lives in its own container so _build_legend can
             # clear and rebuild it when thresholds are edited.
@@ -315,6 +333,14 @@ class JS8RecorderApp:
             self.map_widget.pack(fill=tk.BOTH, expand=True)
             self.map_widget.set_position(39.8283, -98.5795)  # Center of US
             self.map_widget.set_zoom(4)
+
+            # Redraw grid overlays when the user pans, zooms, or the canvas
+            # is resized. Debounced so a drag doesn't trigger one redraw per
+            # pixel. <Configure> covers initial layout too.
+            canvas = self.map_widget.canvas
+            for seq in ("<ButtonRelease-1>", "<MouseWheel>", "<Button-4>",
+                        "<Button-5>", "<Configure>"):
+                canvas.bind(seq, self._schedule_grid_refresh, add="+")
 
         # Status bar
         self.status_var = tk.StringVar(value="Ready")
@@ -744,7 +770,144 @@ class JS8RecorderApp:
             )
             self.map_markers.append(marker)
 
+        self._refresh_grid_overlays()
+
         self.status_var.set(f"Map updated with {len(self.map_markers)} locations")
+
+    # Grid overlays are gated by on-screen size, not zoom — at the same
+    # zoom a wide window shows much larger squares than a tall one. Below
+    # this rendered width, labels overlap and outlines turn to noise.
+    GRID_MIN_PIXELS_PER_SQUARE = 50
+    GRID_NEUTRAL_COLOR = "#888888"
+    GRID_MAX_DRAW = 1000  # hard safety cap
+
+    def _schedule_grid_refresh(self, event=None):
+        """Debounce grid-overlay redraws while the user is panning/zooming."""
+        if self._grid_refresh_after_id is not None:
+            try:
+                self.root.after_cancel(self._grid_refresh_after_id)
+            except Exception:
+                pass
+        self._grid_refresh_after_id = self.root.after(150, self._refresh_grid_overlays)
+
+    def _refresh_grid_overlays(self):
+        """Draw Maidenhead grid squares visible in the current viewport."""
+        self._grid_refresh_after_id = None
+        if not self.map_widget:
+            return
+
+        # Clear everything first so toggling off removes them and panning
+        # doesn't leave stale shapes from the previous viewport.
+        for poly in self.grid_polygons:
+            poly.delete()
+        self.grid_polygons.clear()
+        for label in self.grid_labels:
+            label.delete()
+        self.grid_labels.clear()
+
+        if not self.show_grids_var.get():
+            self.grid_zoom_hint_var.set("")
+            return
+
+        canvas = self.map_widget.canvas
+        w = canvas.winfo_width()
+        h = canvas.winfo_height()
+        if w < 10 or h < 10:
+            # Canvas not realized yet; <Configure> will retry.
+            return
+
+        try:
+            nw_lat, nw_lon = self.map_widget.convert_canvas_coords_to_decimal_coords(0, 0)
+            se_lat, se_lon = self.map_widget.convert_canvas_coords_to_decimal_coords(w, h)
+        except Exception:
+            return
+
+        lat_min = min(nw_lat, se_lat)
+        lat_max = max(nw_lat, se_lat)
+        lon_min = min(nw_lon, se_lon)
+        lon_max = max(nw_lon, se_lon)
+
+        # A grid square is 2 deg wide. If its rendered width drops below
+        # GRID_MIN_PIXELS_PER_SQUARE, suppress the overlay (but leave the
+        # checkbox state alone so it comes back when the user zooms in).
+        lon_span = lon_max - lon_min
+        if lon_span <= 0:
+            return
+        pixels_per_square = (w / lon_span) * 2.0
+        if pixels_per_square < self.GRID_MIN_PIXELS_PER_SQUARE:
+            self.grid_zoom_hint_var.set("(zoom in to see)")
+            return
+        self.grid_zoom_hint_var.set("")
+
+        # Best max_their_snr per grid that has callsigns — these get
+        # SNR-colored outlines so they pop against the neutral graticule.
+        best_snr_by_grid = {}
+        for entry in self.db.get_grids_with_snr_stats():
+            g = entry["grid"]
+            if not g:
+                continue
+            snr = entry["max_their_snr"]
+            if g not in best_snr_by_grid:
+                best_snr_by_grid[g] = snr
+            elif snr is not None and (best_snr_by_grid[g] is None or snr > best_snr_by_grid[g]):
+                best_snr_by_grid[g] = snr
+
+        if self._grid_label_icon is None:
+            self._grid_label_icon = tk.PhotoImage(width=1, height=1)
+
+        # Maidenhead 4-char: lon index 0..179 (each 2 deg from -180),
+        # lat index 0..179 (each 1 deg from -90).
+        lat_idx_start = max(0, int(lat_min + 90))
+        lat_idx_end = min(179, int(lat_max + 90))
+        lon_idx_start = max(0, int((lon_min + 180) / 2))
+        lon_idx_end = min(179, int((lon_max + 180) / 2))
+
+        drawn = 0
+        for lat_idx in range(lat_idx_start, lat_idx_end + 1):
+            if drawn >= self.GRID_MAX_DRAW:
+                break
+            for lon_idx in range(lon_idx_start, lon_idx_end + 1):
+                if drawn >= self.GRID_MAX_DRAW:
+                    break
+
+                sw_lat = lat_idx - 90
+                sw_lon = lon_idx * 2 - 180
+                corners = [
+                    (sw_lat, sw_lon),
+                    (sw_lat, sw_lon + 2),
+                    (sw_lat + 1, sw_lon + 2),
+                    (sw_lat + 1, sw_lon),
+                ]
+
+                grid = (
+                    f"{chr(ord('A') + lon_idx // 10)}"
+                    f"{chr(ord('A') + lat_idx // 10)}"
+                    f"{lon_idx % 10}{lat_idx % 10}"
+                )
+
+                if grid in best_snr_by_grid:
+                    color = self._snr_to_color(best_snr_by_grid[grid])
+                    border = 2
+                else:
+                    color = self.GRID_NEUTRAL_COLOR
+                    border = 1
+
+                poly = self.map_widget.set_polygon(
+                    corners,
+                    outline_color=color,
+                    fill_color=None,
+                    border_width=border,
+                )
+                self.grid_polygons.append(poly)
+
+                label = self.map_widget.set_marker(
+                    sw_lat + 0.5, sw_lon + 1,
+                    text=grid,
+                    icon=self._grid_label_icon,
+                )
+                self.grid_labels.append(label)
+
+                drawn += 1
 
     def _show_messages_menu(self, event):
         """Show context menu for messages tree."""
