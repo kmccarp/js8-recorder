@@ -5,6 +5,7 @@ JS8Call RX.DIRECTED message recorder with GUI.
 
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
+import math
 import queue
 import subprocess
 import platform
@@ -304,6 +305,13 @@ class JS8RecorderApp:
         self._grid_label_icon = None  # lazy: 1x1 transparent so markers render as text-only
         self.show_grids_var = tk.BooleanVar(value=True)
         self.grid_zoom_hint_var = tk.StringVar(value="")
+
+        # Marker-cluster fanning: overlapping callsign markers fan out into a
+        # ring while the cursor hovers near the cluster center so each label
+        # is readable.
+        self.marker_clusters = {}  # (lat, lon) -> [markers] (only clusters with >1)
+        self._fanned_cluster_key = None
+        self._fanned_originals = []  # [(marker, original_position)] for restore
         if HAS_MAP:
             map_frame = ttk.Frame(self.notebook)
             self.notebook.add(map_frame, text="Map")
@@ -345,6 +353,10 @@ class JS8RecorderApp:
             for seq in ("<ButtonRelease-1>", "<MouseWheel>", "<Button-4>",
                         "<Button-5>", "<Configure>"):
                 canvas.bind(seq, self._schedule_grid_refresh, add="+")
+
+            # Cluster fanning hover detection.
+            canvas.bind("<Motion>", self._on_map_motion, add="+")
+            canvas.bind("<Leave>", self._on_map_leave, add="+")
 
         # Status bar
         self.status_var = tk.StringVar(value="Ready")
@@ -771,18 +783,115 @@ class JS8RecorderApp:
             ).pack(side=tk.LEFT, padx=(0, 4))
             ttk.Label(item, text=tier["label"]).pack(side=tk.LEFT)
 
+    # Cluster fanning tuning. Hover radius is how close the cursor must come
+    # to the cluster's *original* center to trigger a fan-out; the fan
+    # radius is how far each marker pushes outward (and also keeps the fan
+    # latched while the cursor is over a fanned marker).
+    CLUSTER_HOVER_RADIUS = 25
+    CLUSTER_FAN_RADIUS = 55
+
+    def _on_map_motion(self, event):
+        """Fan out the cluster the cursor is over; restore others."""
+        if not self.marker_clusters and self._fanned_cluster_key is None:
+            return
+
+        nearest_key = None
+        nearest_dist = float("inf")
+        for key, markers in self.marker_clusters.items():
+            if not markers:
+                continue
+            try:
+                cx, cy = markers[0].get_canvas_pos(key)
+            except Exception:
+                continue
+            dist = math.hypot(event.x - cx, event.y - cy)
+            if dist < nearest_dist:
+                nearest_dist = dist
+                nearest_key = key
+
+        # If we're hovering a new cluster, switch to it.
+        if nearest_key is not None and nearest_dist <= self.CLUSTER_HOVER_RADIUS:
+            if self._fanned_cluster_key != nearest_key:
+                self._restore_fanned_cluster()
+                self._fan_cluster(nearest_key)
+            return
+
+        # Keep the current cluster fanned while the cursor stays near it,
+        # so the user can mouse over the fanned-out markers themselves.
+        if self._fanned_cluster_key is not None:
+            try:
+                m0 = self.marker_clusters[self._fanned_cluster_key][0]
+                cx, cy = m0.get_canvas_pos(self._fanned_cluster_key)
+                if math.hypot(event.x - cx, event.y - cy) > self.CLUSTER_FAN_RADIUS + 15:
+                    self._restore_fanned_cluster()
+            except (KeyError, IndexError, Exception):
+                self._restore_fanned_cluster()
+
+    def _on_map_leave(self, event):
+        """Cursor left the canvas — collapse any fanned cluster."""
+        self._restore_fanned_cluster()
+
+    def _fan_cluster(self, key):
+        """Spread a cluster's markers around the original center in a ring."""
+        markers = self.marker_clusters.get(key)
+        if not markers or len(markers) < 2:
+            return
+
+        try:
+            cx, cy = markers[0].get_canvas_pos(key)
+        except Exception:
+            return
+
+        n = len(markers)
+        self._fanned_originals = []
+        for i, marker in enumerate(markers):
+            self._fanned_originals.append((marker, marker.position))
+            # Start the ring at the top (-pi/2) so a 2-marker cluster splits
+            # vertically; rotate clockwise from there.
+            angle = -math.pi / 2 + (2 * math.pi * i / n)
+            dx = self.CLUSTER_FAN_RADIUS * math.cos(angle)
+            dy = self.CLUSTER_FAN_RADIUS * math.sin(angle)
+            try:
+                new_lat, new_lon = self.map_widget.convert_canvas_coords_to_decimal_coords(cx + dx, cy + dy)
+            except Exception:
+                continue
+            marker.position = (new_lat, new_lon)
+            marker.draw()
+        self._fanned_cluster_key = key
+
+    def _restore_fanned_cluster(self):
+        """Snap any fanned-out markers back to their shared center."""
+        if self._fanned_cluster_key is None:
+            return
+        for marker, original_pos in self._fanned_originals:
+            if getattr(marker, "deleted", False):
+                continue
+            marker.position = original_pos
+            try:
+                marker.draw()
+            except Exception:
+                pass
+        self._fanned_originals = []
+        self._fanned_cluster_key = None
+
     def _refresh_map(self):
         """Refresh the map with current contact locations."""
         if not self.map_widget:
             return
 
+        # Restore any fanned cluster first so we don't try to restore
+        # markers we're about to delete.
+        self._restore_fanned_cluster()
+
         # Clear existing markers
         for marker in self.map_markers:
             marker.delete()
         self.map_markers.clear()
+        self.marker_clusters.clear()
 
         entries = self.db.get_grids_with_snr_stats()
 
+        by_position = {}
         for entry in entries:
             grid = entry["grid"]
             if not grid:
@@ -808,6 +917,10 @@ class JS8RecorderApp:
                 marker_color_outside=color
             )
             self.map_markers.append(marker)
+            by_position.setdefault((lat, lon), []).append(marker)
+
+        # Track only positions where >1 marker overlaps.
+        self.marker_clusters = {pos: ms for pos, ms in by_position.items() if len(ms) > 1}
 
         self._refresh_grid_overlays()
 
