@@ -20,6 +20,21 @@ except ImportError:
     HAS_MAP = False
 
 
+# Map marker color tiers, ordered from strongest SNR to weakest.
+# Each tier colors any SNR >= min_snr that didn't match a higher tier.
+# The final tier acts as the catch-all (use a very low min_snr).
+# Future: this list will be user-editable; keep it as plain data so an
+# edit dialog can mutate it and call _build_legend + _refresh_map.
+DEFAULT_SNR_THRESHOLDS = [
+    {"min_snr": 0,    "color": "green",  "label": "Strong (≥ 0 dB)"},
+    {"min_snr": -10,  "color": "yellow", "label": "Good (-1 to -10 dB)"},
+    {"min_snr": -20,  "color": "orange", "label": "Marginal (-11 to -20 dB)"},
+    {"min_snr": -999, "color": "red",    "label": "Weak (< -20 dB)"},
+]
+NO_DATA_COLOR = "gray"
+NO_DATA_LABEL = "No SNR data"
+
+
 class JS8RecorderApp:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -29,6 +44,10 @@ class JS8RecorderApp:
 
         # Initialize database
         self.db = Database()
+
+        # Per-instance copy so a future edit dialog can mutate without
+        # touching the module default.
+        self.snr_thresholds = [dict(t) for t in DEFAULT_SNR_THRESHOLDS]
 
         # Initialize JS8 client
         self.client = JS8Client()
@@ -284,7 +303,12 @@ class JS8RecorderApp:
             map_controls.pack(fill=tk.X)
 
             ttk.Button(map_controls, text="Refresh Map", command=self._refresh_map).pack(side=tk.LEFT)
-            ttk.Label(map_controls, text="  (Color = SNR quality, Size = contact count)").pack(side=tk.LEFT)
+
+            # Legend lives in its own container so _build_legend can
+            # clear and rebuild it when thresholds are edited.
+            self.legend_frame = ttk.Frame(map_controls)
+            self.legend_frame.pack(side=tk.LEFT, padx=(15, 0))
+            self._build_legend()
 
             # Map widget
             self.map_widget = tkintermapview.TkinterMapView(map_frame, corner_radius=0)
@@ -647,6 +671,41 @@ class JS8RecorderApp:
             ))
         self.grids_tree.update_idletasks()
 
+    def _snr_to_color(self, snr) -> str:
+        """Map an SNR value to a marker color using the current thresholds."""
+        if snr is None:
+            return NO_DATA_COLOR
+        for tier in self.snr_thresholds:
+            if snr >= tier["min_snr"]:
+                return tier["color"]
+        return self.snr_thresholds[-1]["color"]
+
+    def _build_legend(self):
+        """(Re)build the map color legend from self.snr_thresholds."""
+        if not getattr(self, "legend_frame", None):
+            return
+
+        for child in self.legend_frame.winfo_children():
+            child.destroy()
+
+        ttk.Label(self.legend_frame, text="Legend:").pack(side=tk.LEFT, padx=(0, 6))
+
+        entries = list(self.snr_thresholds) + [
+            {"color": NO_DATA_COLOR, "label": NO_DATA_LABEL}
+        ]
+        for tier in entries:
+            item = ttk.Frame(self.legend_frame)
+            item.pack(side=tk.LEFT, padx=(0, 10))
+            # tk.Label (not ttk) so we can set a background color swatch.
+            tk.Label(
+                item,
+                background=tier["color"],
+                width=2,
+                relief="solid",
+                borderwidth=1,
+            ).pack(side=tk.LEFT, padx=(0, 4))
+            ttk.Label(item, text=tier["label"]).pack(side=tk.LEFT)
+
     def _refresh_map(self):
         """Refresh the map with current contact locations."""
         if not self.map_widget:
@@ -674,16 +733,7 @@ class JS8RecorderApp:
             contact_count = entry["contact_count"] or 0
 
             # Determine marker color based on SNR (their reading of us)
-            if max_their_snr is None:
-                color = "gray"
-            elif max_their_snr >= 0:
-                color = "green"
-            elif max_their_snr >= -10:
-                color = "yellow"
-            elif max_their_snr >= -20:
-                color = "orange"
-            else:
-                color = "red"
+            color = self._snr_to_color(max_their_snr)
 
             # Create marker
             marker = self.map_widget.set_marker(
