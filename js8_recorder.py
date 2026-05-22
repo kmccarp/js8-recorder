@@ -949,6 +949,15 @@ class JS8RecorderApp:
         self._current_dim_ratio = state["dim_from"] + (state["dim_to"] - state["dim_from"]) * eased
         self._apply_dim()
 
+        # Keep the active cluster's markers on top of the dimmed ones. Each
+        # marker.draw() above calls manage_z_order which lifts all markers as
+        # a group, so we re-raise the active ones after.
+        if self._fanned_cluster_key is not None:
+            for marker in self.marker_clusters.get(self._fanned_cluster_key, []):
+                if getattr(marker, "deleted", False):
+                    continue
+                self._raise_marker_items(marker)
+
         if progress >= 1.0:
             self._anim_state = None
             return
@@ -969,6 +978,23 @@ class JS8RecorderApp:
             if getattr(marker, "deleted", False):
                 continue
             self._apply_marker_dim(marker, 0.0 if id(marker) in active_ids else blend)
+
+    def _raise_marker_items(self, marker):
+        """Bring a marker's canvas items to the top, preserving internal order
+        (polygon < big_circle < text)."""
+        canvas = self.map_widget.canvas
+        for item in (
+            marker.canvas_icon,
+            marker.polygon,
+            marker.big_circle,
+            marker.canvas_image,
+            marker.canvas_text,
+        ):
+            if item is not None:
+                try:
+                    canvas.tag_raise(item)
+                except Exception:
+                    pass
 
     def _apply_marker_dim(self, marker, blend_ratio):
         """Recolor a marker's canvas items toward white by blend_ratio."""
