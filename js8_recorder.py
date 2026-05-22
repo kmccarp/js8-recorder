@@ -125,6 +125,10 @@ class JS8RecorderApp:
         self.export_button = ttk.Button(button_frame, text="Export to Excel", command=self._export_excel)
         self.export_button.pack(side=tk.LEFT, padx=5)
 
+        # Import button
+        self.import_button = ttk.Button(button_frame, text="Import from Excel", command=self._import_excel)
+        self.import_button.pack(side=tk.LEFT, padx=5)
+
         # Auto-start checkbox
         self.autostart_var = tk.BooleanVar(value=False)
         self.autostart_check = ttk.Checkbutton(
@@ -474,6 +478,41 @@ class JS8RecorderApp:
                 messagebox.showerror("Export Error", str(e))
             except Exception as e:
                 messagebox.showerror("Export Error", f"Failed to export: {e}")
+
+    def _import_excel(self):
+        """Import a previously exported workbook into the database."""
+        filepath = filedialog.askopenfilename(
+            filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")],
+        )
+        if not filepath:
+            return
+        try:
+            summary = self.db.import_from_excel(filepath)
+        except ImportError as e:
+            messagebox.showerror("Import Error", str(e))
+            return
+        except ValueError as e:
+            messagebox.showerror("Import Error", f"Invalid file format:\n{e}")
+            return
+        except Exception as e:
+            messagebox.showerror("Import Error", f"Failed to import: {e}")
+            return
+
+        self._refresh_tables()
+        if HAS_MAP:
+            self._refresh_map()
+
+        messagebox.showinfo(
+            "Import Complete",
+            f"Imported {summary['messages_imported']} new message(s).\n"
+            f"Skipped {summary['messages_skipped']} duplicate(s).\n"
+            f"Upserted {summary['grids_imported']} callsign-grid entries."
+        )
+        self.status_var.set(
+            f"Imported {summary['messages_imported']} messages, "
+            f"{summary['grids_imported']} grids "
+            f"({summary['messages_skipped']} duplicates skipped)"
+        )
 
     def _open_qrz(self, callsign: str):
         """Open QRZ page for callsign, handling WSL properly."""

@@ -8,9 +8,10 @@ from datetime import datetime
 from typing import Optional
 
 try:
-    from openpyxl import Workbook
+    from openpyxl import Workbook, load_workbook
 except ImportError:
     Workbook = None
+    load_workbook = None
 
 
 def format_snr(value) -> str:
@@ -409,6 +410,121 @@ class Database:
 
         wb.save(output_path)
         return True
+
+    def import_from_excel(self, input_path: str) -> dict:
+        """Import a workbook produced by export_to_excel.
+
+        Reads sheets by name and columns by header so older exports still
+        load. Messages are deduped on (callsign, timestamp, message); the
+        callsign-grid table is upserted via add_grid. Returns a summary:
+        {messages_imported, messages_skipped, grids_imported}.
+        """
+        if load_workbook is None:
+            raise ImportError("openpyxl is required for Excel import. Install with: pip install openpyxl")
+
+        wb = load_workbook(input_path, read_only=True, data_only=True)
+
+        summary = {"messages_imported": 0, "messages_skipped": 0, "grids_imported": 0}
+
+        def header_map(ws):
+            """Return {lowercased-header: column-index} for the first row."""
+            headers = {}
+            first_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
+            if not first_row:
+                return headers
+            for idx, value in enumerate(first_row):
+                if value is None:
+                    continue
+                headers[str(value).strip().lower()] = idx
+            return headers
+
+        cursor = self.conn.cursor()
+
+        # ---- Sheet 1: Directed Messages ----
+        if "Directed Messages" in wb.sheetnames:
+            ws = wb["Directed Messages"]
+            cols = header_map(ws)
+            required = {"callsign", "timestamp (utc)", "message"}
+            if not required.issubset(cols):
+                raise ValueError(
+                    f"'Directed Messages' sheet is missing required columns: "
+                    f"{sorted(required - set(cols))}"
+                )
+
+            c_callsign = cols["callsign"]
+            c_timestamp = cols["timestamp (utc)"]
+            c_message = cols["message"]
+            c_band = cols.get("band")
+            c_my_snr = cols.get("my snr of them")
+            c_their_snr = cols.get("their snr of me")
+
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                if row is None:
+                    continue
+                callsign = row[c_callsign] if c_callsign < len(row) else None
+                timestamp = row[c_timestamp] if c_timestamp < len(row) else None
+                message = row[c_message] if c_message < len(row) else None
+                if callsign is None or timestamp is None:
+                    continue  # mandatory fields missing — skip
+
+                callsign = str(callsign).strip()
+                timestamp = str(timestamp).strip()
+                message = "" if message is None else str(message)
+                band = ""
+                if c_band is not None and c_band < len(row) and row[c_band] is not None:
+                    band = str(row[c_band]).strip()
+                my_snr = ""
+                if c_my_snr is not None and c_my_snr < len(row) and row[c_my_snr] is not None:
+                    my_snr = str(row[c_my_snr]).strip().lstrip("+")
+                their_snr = ""
+                if c_their_snr is not None and c_their_snr < len(row) and row[c_their_snr] is not None:
+                    their_snr = str(row[c_their_snr]).strip().lstrip("+")
+
+                # Dedupe against existing rows.
+                cursor.execute(
+                    "SELECT 1 FROM directed_messages "
+                    "WHERE callsign = ? AND timestamp = ? AND message = ? LIMIT 1",
+                    (callsign, timestamp, message),
+                )
+                if cursor.fetchone():
+                    summary["messages_skipped"] += 1
+                    continue
+
+                cursor.execute("""
+                    INSERT INTO directed_messages
+                        (callsign, timestamp, my_snr_of_them, their_snr_of_me, message, band)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (callsign, timestamp, my_snr, their_snr, message, band))
+                summary["messages_imported"] += 1
+
+            self.conn.commit()
+
+        # ---- Sheet 2: Callsign Grids ----
+        if "Callsign Grids" in wb.sheetnames:
+            ws = wb["Callsign Grids"]
+            cols = header_map(ws)
+            if "callsign" not in cols or "grid" not in cols:
+                raise ValueError("'Callsign Grids' sheet is missing 'Callsign' or 'Grid' column")
+
+            c_callsign = cols["callsign"]
+            c_grid = cols["grid"]
+
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                if row is None:
+                    continue
+                callsign = row[c_callsign] if c_callsign < len(row) else None
+                grid = row[c_grid] if c_grid < len(row) else None
+                if callsign is None:
+                    continue
+                callsign = str(callsign).strip()
+                grid = "" if grid is None else str(grid).strip()
+                if not callsign:
+                    continue
+                self.add_grid(callsign, grid)
+                summary["grids_imported"] += 1
+
+        wb.close()
+        return summary
 
     def close(self):
         """Close the database connection."""
