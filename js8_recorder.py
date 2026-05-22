@@ -9,6 +9,7 @@ import math
 import queue
 import subprocess
 import platform
+import time
 from pathlib import Path
 
 from database import Database, format_snr, format_age, get_adjacent_grids, grid_to_latlon
@@ -308,10 +309,13 @@ class JS8RecorderApp:
 
         # Marker-cluster fanning: overlapping callsign markers fan out into a
         # ring while the cursor hovers near the cluster center so each label
-        # is readable.
+        # is readable. Animation interpolates positions + dim level concurrently.
         self.marker_clusters = {}  # (lat, lon) -> [markers] (only clusters with >1)
         self._fanned_cluster_key = None
         self._fanned_originals = []  # [(marker, original_position)] for restore
+        self._anim_after_id = None
+        self._anim_state = None
+        self._current_dim_ratio = 0.0  # 0 = full visibility, 1 = fully dimmed
         if HAS_MAP:
             map_frame = ttk.Frame(self.notebook)
             self.notebook.add(map_frame, text="Map")
@@ -783,12 +787,20 @@ class JS8RecorderApp:
             ).pack(side=tk.LEFT, padx=(0, 4))
             ttk.Label(item, text=tier["label"]).pack(side=tk.LEFT)
 
-    # Cluster fanning tuning. Hover radius is how close the cursor must come
-    # to the cluster's *original* center to trigger a fan-out; the fan
-    # radius is how far each marker pushes outward (and also keeps the fan
-    # latched while the cursor is over a fanned marker).
+    # Cluster fanning tuning.
+    #  - HOVER_RADIUS: cursor proximity to original center that triggers a fan.
+    #  - FAN_RADIUS:   pixel distance markers spread to.
+    #  - FAN_STEP_DEG: angle between adjacent markers (45° = packed clockwise
+    #                  starting from top; falls back to 360/n if there are too
+    #                  many to fit at this spacing).
+    #  - ANIM_*:       animation duration / per-frame interval.
+    #  - DIM_BLEND_MAX: how white the non-cluster markers go at full dim.
     CLUSTER_HOVER_RADIUS = 25
     CLUSTER_FAN_RADIUS = 55
+    CLUSTER_FAN_STEP_DEG = 45
+    CLUSTER_ANIM_DURATION_MS = 220
+    CLUSTER_ANIM_TICK_MS = 20
+    CLUSTER_DIM_BLEND_MAX = 0.65
 
     def _on_map_motion(self, event):
         """Fan out the cluster the cursor is over; restore others."""
@@ -824,7 +836,7 @@ class JS8RecorderApp:
                 cx, cy = m0.get_canvas_pos(self._fanned_cluster_key)
                 if math.hypot(event.x - cx, event.y - cy) > self.CLUSTER_FAN_RADIUS + 15:
                     self._restore_fanned_cluster()
-            except (KeyError, IndexError, Exception):
+            except Exception:
                 self._restore_fanned_cluster()
 
     def _on_map_leave(self, event):
@@ -832,7 +844,7 @@ class JS8RecorderApp:
         self._restore_fanned_cluster()
 
     def _fan_cluster(self, key):
-        """Spread a cluster's markers around the original center in a ring."""
+        """Spread a cluster's markers radially, starting at top, clockwise."""
         markers = self.marker_clusters.get(key)
         if not markers or len(markers) < 2:
             return
@@ -843,45 +855,171 @@ class JS8RecorderApp:
             return
 
         n = len(markers)
+        # 45° per marker, but tighten if there are too many to fit in 360°.
+        step = min(math.radians(self.CLUSTER_FAN_STEP_DEG), 2 * math.pi / n)
+
+        animated = []
         self._fanned_originals = []
         for i, marker in enumerate(markers):
             self._fanned_originals.append((marker, marker.position))
-            # Start the ring at the top (-pi/2) so a 2-marker cluster splits
-            # vertically; rotate clockwise from there.
-            angle = -math.pi / 2 + (2 * math.pi * i / n)
-            dx = self.CLUSTER_FAN_RADIUS * math.cos(angle)
-            dy = self.CLUSTER_FAN_RADIUS * math.sin(angle)
+            # Bearing measured clockwise from north (top). i=0 points straight up.
+            angle = i * step
+            dx = self.CLUSTER_FAN_RADIUS * math.sin(angle)
+            dy = -self.CLUSTER_FAN_RADIUS * math.cos(angle)
             try:
-                new_lat, new_lon = self.map_widget.convert_canvas_coords_to_decimal_coords(cx + dx, cy + dy)
+                target = self.map_widget.convert_canvas_coords_to_decimal_coords(cx + dx, cy + dy)
             except Exception:
-                continue
-            marker.position = (new_lat, new_lon)
-            marker.draw()
+                target = marker.position
+            # Animate from current position (which may be mid-restore) to target.
+            animated.append((marker, marker.position, target))
+
         self._fanned_cluster_key = key
+        self._start_cluster_animation(animated, dim_to=1.0)
 
     def _restore_fanned_cluster(self):
-        """Snap any fanned-out markers back to their shared center."""
+        """Animate fanned markers back to their shared center and un-dim."""
         if self._fanned_cluster_key is None:
+            # Nothing fanned, but we may still be partly dimmed from an
+            # interrupted animation — bring it back to zero.
+            if self._current_dim_ratio > 0.0:
+                self._start_cluster_animation([], dim_to=0.0)
             return
+
+        animated = []
         for marker, original_pos in self._fanned_originals:
             if getattr(marker, "deleted", False):
                 continue
-            marker.position = original_pos
+            animated.append((marker, marker.position, original_pos))
+
+        # Clear state before animating so the motion handler doesn't keep
+        # treating this cluster as "currently fanned".
+        self._fanned_cluster_key = None
+        self._fanned_originals = []
+
+        self._start_cluster_animation(animated, dim_to=0.0)
+
+    # --- Animation primitives ---
+
+    def _cancel_cluster_animation(self):
+        if self._anim_after_id is not None:
+            try:
+                self.root.after_cancel(self._anim_after_id)
+            except Exception:
+                pass
+            self._anim_after_id = None
+        self._anim_state = None
+
+    def _start_cluster_animation(self, animated, dim_to):
+        """Animate marker positions and the dim level from current → target.
+
+        animated: list of (marker, start_pos, end_pos).
+        dim_to: target dim ratio (0.0 to 1.0). Start is wherever we are now.
+        """
+        self._cancel_cluster_animation()
+        self._anim_state = {
+            "animated": animated,
+            "dim_from": self._current_dim_ratio,
+            "dim_to": dim_to,
+            "start_ms": time.monotonic() * 1000.0,
+        }
+        self._cluster_anim_tick()
+
+    def _cluster_anim_tick(self):
+        self._anim_after_id = None
+        state = self._anim_state
+        if state is None:
+            return
+
+        elapsed = time.monotonic() * 1000.0 - state["start_ms"]
+        progress = max(0.0, min(1.0, elapsed / self.CLUSTER_ANIM_DURATION_MS))
+        # Ease-out quadratic — fast start, soft landing.
+        eased = 1.0 - (1.0 - progress) ** 2
+
+        for marker, start_pos, end_pos in state["animated"]:
+            if getattr(marker, "deleted", False):
+                continue
+            new_lat = start_pos[0] + (end_pos[0] - start_pos[0]) * eased
+            new_lon = start_pos[1] + (end_pos[1] - start_pos[1]) * eased
+            marker.position = (new_lat, new_lon)
             try:
                 marker.draw()
             except Exception:
                 pass
-        self._fanned_originals = []
-        self._fanned_cluster_key = None
+
+        self._current_dim_ratio = state["dim_from"] + (state["dim_to"] - state["dim_from"]) * eased
+        self._apply_dim()
+
+        if progress >= 1.0:
+            self._anim_state = None
+            return
+        self._anim_after_id = self.root.after(self.CLUSTER_ANIM_TICK_MS, self._cluster_anim_tick)
+
+    def _apply_dim(self):
+        """Apply the current dim ratio to every contact marker not in the
+        active cluster. The active cluster's markers are always full-color."""
+        if not self.map_widget:
+            return
+        blend = self._current_dim_ratio * self.CLUSTER_DIM_BLEND_MAX
+        active_ids = set()
+        if self._fanned_cluster_key is not None:
+            active_ids = {
+                id(m) for m in self.marker_clusters.get(self._fanned_cluster_key, [])
+            }
+        for marker in self.map_markers:
+            if getattr(marker, "deleted", False):
+                continue
+            self._apply_marker_dim(marker, 0.0 if id(marker) in active_ids else blend)
+
+    def _apply_marker_dim(self, marker, blend_ratio):
+        """Recolor a marker's canvas items toward white by blend_ratio."""
+        canvas = self.map_widget.canvas
+        if marker.polygon is not None:
+            c = self._blend_toward_white(marker.marker_color_outside, blend_ratio)
+            try:
+                canvas.itemconfig(marker.polygon, fill=c, outline=c)
+            except Exception:
+                pass
+        if marker.big_circle is not None:
+            c_fill = self._blend_toward_white(marker.marker_color_circle, blend_ratio)
+            c_outline = self._blend_toward_white(marker.marker_color_outside, blend_ratio)
+            try:
+                canvas.itemconfig(marker.big_circle, fill=c_fill, outline=c_outline)
+            except Exception:
+                pass
+        if marker.canvas_text is not None:
+            c = self._blend_toward_white(marker.text_color, blend_ratio)
+            try:
+                canvas.itemconfig(marker.canvas_text, fill=c)
+            except Exception:
+                pass
+
+    def _blend_toward_white(self, color, ratio):
+        """Return a hex color that is `color` blended `ratio` toward white."""
+        if ratio <= 0.0:
+            return color
+        try:
+            r, g, b = self.root.winfo_rgb(color)
+        except Exception:
+            return color
+        r >>= 8
+        g >>= 8
+        b >>= 8
+        nr = int(r + (255 - r) * ratio)
+        ng = int(g + (255 - g) * ratio)
+        nb = int(b + (255 - b) * ratio)
+        return f"#{nr:02x}{ng:02x}{nb:02x}"
 
     def _refresh_map(self):
         """Refresh the map with current contact locations."""
         if not self.map_widget:
             return
 
-        # Restore any fanned cluster first so we don't try to restore
-        # markers we're about to delete.
-        self._restore_fanned_cluster()
+        # Cancel any animation in flight — the markers it captured are about
+        # to disappear, and the new ones start at full visibility.
+        self._cancel_cluster_animation()
+        self._fanned_cluster_key = None
+        self._fanned_originals = []
+        self._current_dim_ratio = 0.0
 
         # Clear existing markers
         for marker in self.map_markers:
